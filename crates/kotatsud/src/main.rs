@@ -209,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kotatsud=info,kotatsu=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "kotatsud=info,kotatsu=info".into()),
         )
         .init();
 
@@ -318,9 +318,7 @@ async fn main() -> anyhow::Result<()> {
     pool_cfg.maintenance_interval = cfg.maintenance_interval;
     pool_cfg.reap_lost_vms = cfg.reap_lost_vms;
     // `http://` endpoints only when a mock endpoint override says so.
-    if cli.mock_endpoint.is_some() {
-        pool_cfg.allow_insecure_endpoints = mock_endpoint_is_http;
-    }
+    pool_cfg.allow_insecure_endpoints = mock_endpoint_is_http;
     let pool = Arc::new(kotatsu::SandboxPool::new(cp, store, pool_cfg)?);
 
     let _maintenance = pool.spawn_maintenance();

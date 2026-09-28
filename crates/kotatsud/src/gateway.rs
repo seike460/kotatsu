@@ -651,6 +651,6 @@ fn to_axum(m: TungMsg) -> AxumMsg {
         })),
         // Raw frames are filtered out by the read loop, so this arm is
         // unreachable — kept only to satisfy the exhaustive match.
-        TungMsg::Frame(_) => AxumMsg::Binary(bytes::Bytes::new()),
+        TungMsg::Frame(_) => AxumMsg::Binary(Default::default()),
     }
 }
