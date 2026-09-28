@@ -44,6 +44,13 @@ fn port_spec_parse() {
     assert_eq!(PortSpec::parse("*").unwrap(), PortSpec::All);
     assert!(PortSpec::parse("0").is_err());
     assert!(PortSpec::parse("99999").is_err());
+    assert_eq!(
+        PortSpec::parse("9000-9000").unwrap(),
+        PortSpec::Range {
+            start: 9000,
+            end: 9000
+        }
+    );
     assert!(PortSpec::parse("9010-9000").is_err());
     assert!(PortSpec::parse("abc").is_err());
 }

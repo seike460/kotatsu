@@ -1139,22 +1139,6 @@ mod tests {
     }
 
     #[test]
-    fn port_specs_parse() {
-        assert_eq!(PortSpec::parse("8080").unwrap(), PortSpec::Port(8080));
-        assert_eq!(
-            PortSpec::parse("9000-9010").unwrap(),
-            PortSpec::Range {
-                start: 9000,
-                end: 9010
-            }
-        );
-        assert_eq!(PortSpec::parse("all").unwrap(), PortSpec::All);
-        assert!(PortSpec::parse("0").is_err());
-        assert!(PortSpec::parse("9000-9000").is_ok());
-        assert!(PortSpec::parse("9010-9000").is_err());
-    }
-
-    #[test]
     fn ttl_bounds() {
         assert!(check_ttl(1).is_ok());
         assert!(check_ttl(60).is_ok());
