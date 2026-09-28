@@ -284,11 +284,7 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
         Err(_) => return err(StatusCode::GATEWAY_TIMEOUT, "app ws connect timed out"),
     };
     ws.protocols([WS_BASE])
-        .on_upgrade(move |socket| async move {
-            if let Err(e) = pipe_ws(socket, app_stream).await {
-                tracing::debug!(error = %e, "dev ws pipe ended");
-            }
-        })
+        .on_upgrade(move |socket| pipe_ws(socket, app_stream))
 }
 
 // NOTE: mirrors `pipe_ws`/`to_tungstenite`/`to_axum` in
@@ -297,10 +293,7 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
 // auth/tenant headers, and extracting them into `kotatsu` would pull
 // axum into the core crate. Keep behavior in sync when editing.
 
-async fn pipe_ws(
-    socket: WebSocket,
-    app_stream: kotatsu::WsStream,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn pipe_ws(socket: WebSocket, app_stream: kotatsu::WsStream) {
     let (mut app_tx, mut app_rx) = app_stream.split();
     let (mut cli_tx, mut cli_rx) = socket.split();
 
@@ -336,7 +329,6 @@ async fn pipe_ws(
         _ = to_app => {}
         _ = to_client => {}
     }
-    Ok(())
 }
 
 fn to_tungstenite(m: AxumMsg) -> TungMsg {

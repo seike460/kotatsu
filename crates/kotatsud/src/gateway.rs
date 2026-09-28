@@ -551,9 +551,7 @@ async fn ws_proxy(
     kotatsu::metrics::record_http_request(101, start.elapsed());
     ws.on_upgrade(move |socket| async move {
         let _session = SessionGauge::new();
-        if let Err(e) = pipe_ws(socket, upstream_stream).await {
-            tracing::debug!(error = %e, "ws pipe ended");
-        }
+        pipe_ws(socket, upstream_stream).await;
     })
 }
 
@@ -577,10 +575,7 @@ impl Drop for SessionGauge {
 // side trusts its peer, and extracting them into `kotatsu` would pull
 // axum into the core crate. Keep behavior in sync when editing.
 
-async fn pipe_ws(
-    socket: WebSocket,
-    upstream_stream: kotatsu::WsStream,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn pipe_ws(socket: WebSocket, upstream_stream: kotatsu::WsStream) {
     let (mut vm_tx, mut vm_rx) = upstream_stream.split();
     let (mut cli_tx, mut cli_rx) = socket.split();
 
@@ -619,7 +614,6 @@ async fn pipe_ws(
         _ = client_to_vm => {}
         _ = vm_to_client => {}
     }
-    Ok(())
 }
 
 fn to_tungstenite(m: AxumMsg) -> TungMsg {
