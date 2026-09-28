@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway origin, so one tenant could otherwise register a service
   worker over every tenant's pages, clear their cookies and storage, or
   collect network error reports for the whole origin.
+- kotatsud config file errors no longer quote the file. They give the
+  path, line and column and the parser's message. Before, a misspelled
+  key or a wrong value type printed the whole line, and serde's type
+  errors printed the value, so an API key could reach the startup
+  error and the logs that collect it.
 
 ### Fixed
 

@@ -165,12 +165,43 @@ struct FileConfig {
     maintenance_interval: Option<Duration>,
     reap_lost_vms: Option<bool>,
     state_db: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "secret_list")]
     api_keys: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "secret_list")]
     tenant_keys: Vec<String>,
     #[serde(default)]
     allow_unauthenticated: bool,
+}
+
+/// An array of secrets. serde's type errors quote the rejected value
+/// (`invalid type: string "…"`), so they are replaced.
+fn secret_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    <Vec<String> as serde::Deserialize>::deserialize(d)
+        .map_err(|_| serde::de::Error::custom("expected an array of strings"))
+}
+
+/// Reads the `--config` file. Errors name the path and position but
+/// never quote the file: it holds API keys, and startup errors end up
+/// in collected logs.
+fn load_config(path: &std::path::Path) -> anyhow::Result<FileConfig> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read config {}: {e}", path.display()))?;
+    parse_config(&text).map_err(|e| anyhow::anyhow!("invalid config {}: {e}", path.display()))
+}
+
+/// Parses the config text. The error is the parser's message and its
+/// position; `toml::de::Error`'s `Display` would quote the whole line.
+fn parse_config(text: &str) -> Result<FileConfig, String> {
+    toml::from_str(text).map_err(|e: toml::de::Error| {
+        let msg = e.message().trim_end().replace('\n', "; ");
+        let Some(before) = e.span().and_then(|s| text.get(..s.start)) else {
+            return msg;
+        };
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let line = before.matches('\n').count() + 1;
+        let column = before[line_start..].chars().count() + 1;
+        format!("line {line}, column {column}: {msg}")
+    })
 }
 
 #[tokio::main]
@@ -184,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let file: FileConfig = match &cli.config {
-        Some(p) => toml::from_str(&std::fs::read_to_string(p)?)?,
+        Some(p) => load_config(p)?,
         None => FileConfig::default(),
     };
 
@@ -703,7 +734,7 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .expect("README has a toml block");
-        let file: FileConfig = toml::from_str(toml).unwrap();
+        let file = parse_config(toml).unwrap();
         let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
         let cfg = Resolved::resolve(&cli, &file).unwrap();
         cfg.validate().unwrap();
@@ -721,6 +752,34 @@ mod tests {
             let err = parse_tenant_key(bad).unwrap_err();
             assert!(!err.contains("s3cret"), "key leaked in error: {err}");
         }
+    }
+
+    #[test]
+    fn config_errors_never_quote_the_file() {
+        // The file holds API keys, and startup errors reach collected
+        // logs: an error gives the position, never the line or value.
+        for (bad, at) in [
+            // Misspelled key (unknown field).
+            ("api_key = \"s3cret\"", "line 1, column 1"),
+            // A single string where an array is expected.
+            ("api_keys = \"s3cret\"", "line 1, column 12"),
+            (
+                "listen = \"127.0.0.1:3000\"\ntenant_keys = \"alice=s3cret\"",
+                "line 2, column 15",
+            ),
+            // A non-string element.
+            ("api_keys = [\"s3cret\", 5]", "line 1, column 12"),
+            // Syntax error: unterminated string.
+            ("tenant_keys = [\"alice=s3cret]", "line 1, column"),
+        ] {
+            let err = parse_config(bad).err().unwrap();
+            assert!(!err.contains("s3cret"), "{bad:?} leaked: {err}");
+            assert!(err.starts_with(at), "{bad:?}: {err}");
+        }
+        let err = load_config(std::path::Path::new("/nonexistent/kotatsud.toml"))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("/nonexistent/kotatsud.toml"));
     }
 
     #[test]
