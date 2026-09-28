@@ -812,7 +812,8 @@ mod tests {
         };
         assert!(valid().validate().is_ok());
 
-        let rejected: &[(&str, fn(&mut Resolved))] = &[
+        type Change = fn(&mut Resolved);
+        let rejected: &[(&str, Change)] = &[
             ("--image", |c| c.image = None),
             ("no API keys", |c| c.api_keys.clear()),
             ("empty API key", |c| c.api_keys.push(" ".into())),
@@ -834,7 +835,7 @@ mod tests {
             assert!(err.contains(want), "case {i}: {err}");
         }
 
-        let accepted: &[fn(&mut Resolved)] = &[
+        let accepted: &[Change] = &[
             |c| {
                 c.image = None;
                 c.mock = true;
