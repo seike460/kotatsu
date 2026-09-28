@@ -105,6 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FAILED`.
 - `kotatsu dev` answers 502 to a request whose auto-resume fails, as
   AWS does. It used to answer 503.
+- `GET /_kotatsu/state` answers `{"state":"FAILED","error":"…"}` after
+  a failed boot. Before, only this state was an object
+  (`{"state":{"FAILED":"…"}}`) instead of a string.
 
 ### Changed
 

@@ -32,14 +32,23 @@ pub enum DevState {
     Failed(String),
 }
 
+impl DevState {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Running => "RUNNING",
+            Self::Suspended => "SUSPENDED",
+            Self::Terminated => "TERMINATED",
+            Self::Failed(_) => "FAILED",
+        }
+    }
+}
+
 impl std::fmt::Display for DevState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pending => write!(f, "PENDING"),
-            Self::Running => write!(f, "RUNNING"),
-            Self::Suspended => write!(f, "SUSPENDED"),
-            Self::Terminated => write!(f, "TERMINATED"),
             Self::Failed(e) => write!(f, "FAILED({e})"),
+            s => f.write_str(s.name()),
         }
     }
 }
@@ -432,14 +441,22 @@ impl Drop for Emulator {
 
 // -- control API (operator-facing, not part of the AWS contract) ------
 
+/// `{"state":"RUNNING"}`; a `FAILED` state adds `"error"`.
 #[derive(Serialize)]
 struct StateBody {
-    state: DevState,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 async fn state_handler(State(s): State<Arc<Shared>>) -> axum::Json<StateBody> {
+    let state = s.dev_state();
     axum::Json(StateBody {
-        state: s.dev_state(),
+        state: state.name(),
+        error: match state {
+            DevState::Failed(e) => Some(e),
+            _ => None,
+        },
     })
 }
 

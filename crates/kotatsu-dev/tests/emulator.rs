@@ -265,7 +265,7 @@ async fn control_state_endpoint_reports_lifecycle() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["state"], "RUNNING");
+    assert_eq!(r, serde_json::json!({"state": "RUNNING"}));
 
     let r = http
         .post(format!("{ep}/_kotatsu/suspend"))
@@ -515,4 +515,36 @@ async fn failed_suspend_or_resume_hook_keeps_state() {
     let resp = authed(&http, &format!("{ep}/x")).send().await.unwrap();
     assert_eq!(resp.status(), 502);
     assert_eq!(emu.state(), DevState::Suspended);
+}
+
+/// A boot hook failure settles `Failed`: the state API reports it as a
+/// plain `"FAILED"` string plus `"error"`, and traffic gets 500.
+#[tokio::test]
+async fn failed_boot_reports_state_and_answers_500() {
+    let app = Router::new().route(
+        &hook("run"),
+        post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+    );
+    let app_addr = serve(app).await;
+    let emu = Emulator::start(EmulatorConfig::new(format!("http://{app_addr}")))
+        .await
+        .unwrap();
+    let error = "run hook returned 500 Internal Server Error";
+    assert_eq!(emu.wait_boot().await, DevState::Failed(error.into()));
+
+    let r: serde_json::Value = client()
+        .get(format!("{}/_kotatsu/state", emu.endpoint()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r, serde_json::json!({"state": "FAILED", "error": error}));
+
+    let resp = authed(&client(), &format!("{}/x", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
 }
