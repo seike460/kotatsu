@@ -153,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently matched nothing.
 - `kotatsud::gateway` is hidden from the docs. The kotatsud library
   exists for its binary and tests and is not a stable API.
+- The `kotatsu` crate no longer turns on features it does not use:
+  `behavior-version-latest` of `aws-config` and `serde` of `chrono` and
+  `uuid`. A crate that relied on kotatsu for them, for example to call
+  `aws_config::from_env()` without a deprecation warning or to
+  serialize a `Uuid`, must enable them in its own `Cargo.toml`.
 
 ## [0.1.0] - 2026-09-28
 
