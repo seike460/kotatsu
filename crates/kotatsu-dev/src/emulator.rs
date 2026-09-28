@@ -19,7 +19,7 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DevState {
-    /// Booting: `/run` then `/ready` polling is in progress.
+    /// Booting: `/validate`, `/run`, then `/ready` polling is in progress.
     Pending,
     /// Serving traffic.
     Running,
@@ -122,7 +122,7 @@ impl EmulatorConfig {
     pub fn new(app_url: impl Into<String>) -> Self {
         Self {
             app_url: app_url.into(),
-            app_port: 8080,
+            app_port: kotatsu::DEFAULT_APP_PORT,
             listen: "127.0.0.1:0".parse().expect("valid addr"),
             microvm_id: "microvm-dev000000001".into(),
             run_hook_payload: "{}".into(),

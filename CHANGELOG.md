@@ -117,6 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Origin`, on the WebSocket handshake to the app, as AWS does. Before,
   the app's handshake carried none of them. The contract subprotocols
   are still removed.
+- Docs: kotatsu-dev states what a failed hook does and the
+  `/_kotatsu/state` response format, and `DevState::Pending` lists the
+  `/validate` hook.
 
 ### Changed
 

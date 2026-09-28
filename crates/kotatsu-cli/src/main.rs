@@ -355,7 +355,11 @@ struct DevCmd {
     #[arg(long)]
     app_url: String,
     /// The app's port — the only `X-aws-proxy-port` value accepted.
-    #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(
+        long,
+        default_value_t = kotatsu::DEFAULT_APP_PORT,
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
     app_port: u16,
     /// Address the fake VM endpoint binds.
     #[arg(long, default_value = "127.0.0.1:0")]

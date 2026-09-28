@@ -552,7 +552,10 @@ impl Resolved {
                 .unwrap_or_else(|| "127.0.0.1:3000".parse().unwrap()),
             region: cli.region.clone().or_else(|| file.region.clone()),
             image: cli.image.clone().or_else(|| file.image.clone()),
-            app_port: cli.app_port.or(file.app_port).unwrap_or(8080),
+            app_port: cli
+                .app_port
+                .or(file.app_port)
+                .unwrap_or(kotatsu::DEFAULT_APP_PORT),
             warm_size: cli.warm_size.or(file.warm_size).unwrap_or(4),
             warm_schedule: if !cli.warm_schedule.is_empty() {
                 cli.warm_schedule.clone()
