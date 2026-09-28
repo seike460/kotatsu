@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Before, kotatsud followed a VM-supplied `Location` itself —
   fetching internal URLs (SSRF) with `X-aws-proxy-auth` attached — and a
   redirect's own `Set-Cookie` never reached the browser.
+- kotatsud also strips `Service-Worker-Allowed`, `Clear-Site-Data`,
+  `NEL` and `Report-To` from upstream responses, as it already did
+  `Strict-Transport-Security` and `Alt-Svc`. All tenants share the
+  gateway origin, so one tenant could otherwise register a service
+  worker over every tenant's pages, clear their cookies and storage, or
+  collect network error reports for the whole origin.
 
 ### Fixed
 

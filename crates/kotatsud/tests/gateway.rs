@@ -34,6 +34,24 @@ fn upstream_app() -> Router {
             }),
         )
         .route(
+            "/origin-wide",
+            get(|| async {
+                Response::builder()
+                    .header("strict-transport-security", "max-age=31536000")
+                    .header("alt-svc", "h3=\":443\"")
+                    .header("service-worker-allowed", "/")
+                    .header("clear-site-data", "\"cookies\", \"storage\"")
+                    .header("nel", r#"{"report_to":"t","max_age":86400,"success_fraction":1.0}"#)
+                    .header(
+                        "report-to",
+                        r#"{"group":"t","max_age":86400,"endpoints":[{"url":"https://collector.example/r"}]}"#,
+                    )
+                    .header("x-app", "kept")
+                    .body(axum::body::Body::from("ok"))
+                    .unwrap()
+            }),
+        )
+        .route(
             "/ws",
             get(|ws: WebSocketUpgrade| async move {
                 // The AWS contract requires the server to select a
@@ -565,4 +583,37 @@ async fn websocket_proxy_echoes_through() {
         err,
         tokio_tungstenite::tungstenite::Error::Http(_)
     ));
+}
+
+/// All tenants share the gateway origin, so upstream headers that act
+/// on the whole origin must not reach the browser. Other app headers
+/// pass through.
+#[tokio::test]
+async fn origin_wide_response_headers_are_stripped() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/origin-wide"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    for name in [
+        "strict-transport-security",
+        "alt-svc",
+        "service-worker-allowed",
+        "clear-site-data",
+        "nel",
+        "report-to",
+    ] {
+        assert!(
+            !resp.headers().contains_key(name),
+            "{name} leaked: {:?}",
+            resp.headers()
+        );
+    }
+    assert_eq!(resp.headers()["x-app"], "kept");
 }

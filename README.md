@@ -96,6 +96,7 @@ kotatsud --listen 0.0.0.0:9000 \
 - kotatsud 自体は平文 HTTP です。**公開 bind では必ず TLS 終端(LB/リバースプロキシ)を前段に置いてください**。loopback 以外への bind では起動時に警告を出します
 - クライアントの `Authorization`・`?key=`・`Connection` 指名・hop-by-hop ヘッダは upstream に流しません
 - tenant 境界: `--tenant-key` のスコープ付きキーは自 tenant の `/t/*` にしか届きません。上流の `Set-Cookie` は `Path` を `/t/{tenant}` 以下に書き換え `Domain` を除去するので、Cookie が tenant をまたぎません(Path を無視する非ブラウザクライアントには効きません — その場合は tenant ごとの host を使ってください)
+- 全 tenant が同じ origin を共有するので、origin 全体に効く上流の応答ヘッダ(`Strict-Transport-Security`・`Alt-Svc`・`Service-Worker-Allowed`・`Clear-Site-Data`・`NEL`・`Report-To`)はクライアントに返しません
 - ブラウザ WS 用 `?key=` は TLS 前段の access log や APM に残り得ます。短命のスコープ付きキーを使うか、前段で query を記録しない設定にしてください
 - `x-forwarded-for` はクライアントの ConnectInfo から、`x-forwarded-proto` は `--forwarded-proto` 設定値からゲートウェイが生成します
 - `AuthToken` は Debug 出力で `<redacted>`、TTL ≤60 分(既定 30 分)・ポートスコープ付きで最小化します

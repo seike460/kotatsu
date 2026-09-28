@@ -97,9 +97,15 @@ const STRIPPED: &[&str] = &[
     "x-forwarded-proto",
     "x-forwarded-port",
     "x-real-ip",
-    // Same-origin poisoning: tenant apps must not set these on the
-    // shared gateway host. `set-cookie` stays — sandbox apps need it.
+    // Same-origin poisoning: each of these acts on the whole origin
+    // (transport, stored data, service-worker scope, error reporting),
+    // and every tenant shares the gateway host. `set-cookie` stays —
+    // sandbox apps need it — and is clamped to the tenant path instead.
     "alt-svc",
+    "clear-site-data",
+    "nel",
+    "report-to",
+    "service-worker-allowed",
     "strict-transport-security",
     // WS handshake fields have no meaning on the plain-HTTP path.
     "sec-websocket-accept",
