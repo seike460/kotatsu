@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kotatsud, `--reap-lost-vms` needs an ARN `--image`. `list-microvms`
   reports image ARNs, so with an image ID the lost-VM reconcile
   silently matched nothing.
+- `kotatsud::gateway` is hidden from the docs. The kotatsud library
+  exists for its binary and tests and is not a stable API.
 
 ## [0.1.0] - 2026-09-28
 
