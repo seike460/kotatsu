@@ -280,8 +280,10 @@ impl ControlPlane for MockControlPlane {
         }
         let mut guard = self.inner.lock();
         let entry = Self::lookup(&mut guard, id)?;
+        // Parity with `terminate-microvm`, which is idempotent: a VM that
+        // is already terminating or terminated terminates successfully.
         if !entry.vm.state.is_live() {
-            return Err(Error::Terminated(id.to_string()));
+            return Ok(());
         }
         entry.clear_transition();
         if self.behavior.terminate_time.is_zero() {

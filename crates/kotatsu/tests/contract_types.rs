@@ -250,11 +250,12 @@ async fn transitional_states_are_observable() {
 }
 
 #[tokio::test]
-async fn double_terminate_fails() {
+async fn double_terminate_is_idempotent() {
     let cp = MockControlPlane::new();
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     cp.terminate(&vm.id).await.unwrap();
-    assert!(cp.terminate(&vm.id).await.is_err());
+    cp.terminate(&vm.id).await.unwrap();
+    assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Terminated);
     assert!(
         cp.get(&MicrovmId::new("microvm-404").unwrap())
             .await

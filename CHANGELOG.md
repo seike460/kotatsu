@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "service error" / "dispatch failure", so `%e` logs show why a call
   failed (e.g. `AccessDeniedException`).
 
+### Changed
+
+- `MockControlPlane::terminate` is idempotent like `terminate-microvm`:
+  terminating an already terminated MicroVM succeeds instead of
+  returning `Error::Terminated`.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added
