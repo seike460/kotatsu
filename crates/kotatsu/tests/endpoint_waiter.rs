@@ -1,12 +1,15 @@
 //! Tests for `TokenVending`, `MicrovmEndpoint` and the waiters, all
 //! against `MockControlPlane` (no AWS credentials required).
 
+mod common;
+
 use kotatsu::mock::{MockBehavior, MockControlPlane};
 use kotatsu::{
     ControlPlane, Error, MicrovmEndpoint, PortSpec, RunRequest, RunningVm, State, TokenKind,
     TokenVending, WaitPolicy, wait_for_state, wait_until_running,
 };
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 fn policy() -> WaitPolicy {
@@ -247,6 +250,26 @@ async fn hostile_paths_cannot_escape_origin() {
     let req = ep.get("/ok?q=1").await.unwrap().build().unwrap();
     assert_eq!(req.url().host_str(), ep.url().host_str());
     assert_eq!(req.url().scheme(), "https");
+}
+
+#[tokio::test]
+async fn endpoint_does_not_follow_upstream_redirects() {
+    // A VM answering with a redirect must not make the client fetch
+    // the target — that would carry X-aws-proxy-auth off the VM origin.
+    let (leak, leak_hits) = common::canned_http(200, &[], "secret").await;
+    let target = format!("http://{leak}/latest/meta-data/");
+    for status in [301, 302, 303, 307, 308] {
+        let (vm_addr, _) = common::canned_http(status, &[("location", &target)], "").await;
+        let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{vm_addr}")));
+        let vm = cp.run(&RunRequest::new("img")).await.unwrap();
+        let running = wait_until_running(&*cp, &vm.id, &policy()).await.unwrap();
+        let ep = MicrovmEndpoint::new_insecure(&running, Arc::new(TokenVending::new(cp))).unwrap();
+
+        let resp = ep.get("/start").await.unwrap().send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), status);
+        assert_eq!(resp.headers()["location"], target.as_str());
+    }
+    assert_eq!(leak_hits.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

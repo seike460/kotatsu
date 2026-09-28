@@ -78,6 +78,10 @@ impl MicrovmEndpoint {
     }
 
     /// Uses a preconfigured `reqwest::Client` (timeouts, TLS roots…).
+    ///
+    /// Build it with `redirect(reqwest::redirect::Policy::none())`: a
+    /// client that follows redirects resends `X-aws-proxy-auth` to any
+    /// URL the VM answers with.
     #[must_use]
     pub fn with_client(mut self, http: reqwest::Client) -> Self {
         self.http = Some(http);
@@ -302,12 +306,15 @@ impl std::fmt::Debug for WsRequest {
 /// Connect timeout only: no total timeout, because callers may
 /// legitimately hold long-lived responses (SSE, streaming). Endpoints
 /// that need different behavior install their own via `with_client`.
+/// Redirects are returned to the caller, never followed: following one
+/// would resend `X-aws-proxy-auth` to wherever the VM points.
 fn default_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("reqwest::Client with only a connect timeout cannot fail")
+            .expect("reqwest::Client with a connect timeout and no redirects cannot fail")
     });
     &CLIENT
 }

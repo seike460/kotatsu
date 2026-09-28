@@ -793,6 +793,7 @@ impl SandboxPool {
             maintaining: AtomicBool::new(false),
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
     }

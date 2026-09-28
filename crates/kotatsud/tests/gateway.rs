@@ -5,11 +5,12 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
 use axum::extract::{Request, WebSocketUpgrade};
 use axum::response::Response;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use common::{gateway_router, serve};
 use futures_util::{SinkExt, StreamExt};
 use kotatsu::mock::MockControlPlane;
@@ -239,6 +240,83 @@ async fn set_cookie_is_clamped_to_tenant_path() {
     assert!(!d.contains("Path=/t/u1evil"), "escape kept verbatim: {d}");
     // No Path gains the tenant prefix.
     assert!(cookie("e=5").contains("Path=/t/u1"), "e: {cookies:?}");
+}
+
+/// Upstream redirects go back to the client untouched. Following them
+/// inside the gateway would let a VM make kotatsud fetch internal URLs
+/// (SSRF) with X-aws-proxy-auth attached, and would swallow the
+/// redirect's own Set-Cookie.
+#[tokio::test]
+async fn upstream_redirects_are_passed_through_not_followed() {
+    let leak_hits = Arc::new(AtomicUsize::new(0));
+    let hits = leak_hits.clone();
+    let internal = serve(Router::new().fallback(move || {
+        hits.fetch_add(1, Ordering::SeqCst);
+        async { "internal" }
+    }))
+    .await;
+    let target = format!("http://{internal}/latest/meta-data/");
+    let (see_other, found) = (target.clone(), target.clone());
+    let upstream = serve(
+        Router::new()
+            .route(
+                "/see-other",
+                get(move || async move {
+                    Response::builder()
+                        .status(303)
+                        .header("location", see_other)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/login",
+                post(move || async move {
+                    Response::builder()
+                        .status(302)
+                        .header("location", found)
+                        .header("set-cookie", "session=1; Path=/")
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            ),
+    )
+    .await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = http
+        .get(format!("http://{gw}/t/u1/see-other"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 303);
+    assert_eq!(resp.headers()["location"], target.as_str());
+
+    let resp = http
+        .post(format!("http://{gw}/t/u1/login"))
+        .bearer_auth("k1")
+        .body("user=a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 302);
+    assert_eq!(resp.headers()["location"], target.as_str());
+    assert!(
+        resp.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .starts_with("session=1"),
+        "{:?}",
+        resp.headers()
+    );
+
+    assert_eq!(leak_hits.load(Ordering::SeqCst), 0);
 }
 
 /// A tenant-scoped key authenticates for its own tenant but is

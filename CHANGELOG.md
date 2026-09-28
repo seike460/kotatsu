@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The `SandboxPool` proxy client and the default `MicrovmEndpoint` client
+  no longer follow HTTP redirects; a VM's 3xx response reaches the caller
+  unchanged. Before, kotatsud followed a VM-supplied `Location` itself —
+  fetching internal URLs (SSRF) with `X-aws-proxy-auth` attached — and a
+  redirect's own `Set-Cookie` never reached the browser.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added
