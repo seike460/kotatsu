@@ -393,12 +393,7 @@ async fn encoded_path_chars_are_preserved() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let path = body["path"].as_str().unwrap();
-    assert!(path.contains("q=v"), "query was lost to fragment: {path}");
-    assert!(
-        path.contains("a%2Fb") || path.contains("a/b"),
-        "%2F mangled: {path}"
-    );
+    assert_eq!(body["path"], "/a%2Fb%23frag?q=v");
 }
 
 /// Non-UTF-8 percent-encoded bytes in the query reach the VM verbatim —
@@ -536,6 +531,14 @@ async fn metrics_and_healthz_work() {
         .unwrap();
     assert_eq!(h.status(), 200);
 
+    let proxied = http
+        .get(format!("http://{gw}/t/u1/x"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxied.status(), 200);
+
     let m = http
         .get(format!("http://{gw}/metrics"))
         .send()
@@ -546,15 +549,22 @@ async fn metrics_and_healthz_work() {
         m.headers()["content-type"].to_str().unwrap(),
         "text/plain; version=0.0.4"
     );
+    let body = m.text().await.unwrap();
+    for series in [
+        "# TYPE kotatsu_gateway_requests_total counter",
+        "kotatsu_gateway_requests_total{status_class=\"2xx\"} ",
+        "# TYPE kotatsu_gateway_request_seconds summary",
+        "kotatsu_pool_acquire_total{outcome=\"ok\"} ",
+        "kotatsu_vm_launch_total ",
+    ] {
+        assert!(body.contains(series), "{series:?} missing from:\n{body}");
+    }
 }
 
 /// WebSocket proxy: browser-style `?key=` auth (no header) plus an echo
 /// upstream — proves the subprotocol handshake and frame relay work.
 #[tokio::test]
 async fn websocket_proxy_echoes_through() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("kotatsud=debug,kotatsu=debug")
-        .try_init();
     let upstream = serve(upstream_app()).await;
     let (app, _cp) = gateway_app(&format!("http://{upstream}"));
     let gw = serve(app).await;

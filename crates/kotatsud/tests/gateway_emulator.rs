@@ -83,7 +83,7 @@ async fn chain() -> (SocketAddr, Emulator) {
 
 #[tokio::test]
 async fn http_request_flows_gateway_emulator_app() {
-    let (gw, _emu) = chain().await;
+    let (gw, emu) = chain().await;
     let http = reqwest::Client::new();
 
     let resp = http
@@ -105,7 +105,7 @@ async fn http_request_flows_gateway_emulator_app() {
     // A direct call to the emulator without contract creds still fails —
     // the chain did not weaken the emulator's own gate.
     let direct = http
-        .get(format!("{}/echo", _emu.endpoint()))
+        .get(format!("{}/echo", emu.endpoint()))
         .send()
         .await
         .unwrap();
