@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long, env = "KOTATSU_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Listen address for the gateway.
+    /// Listen address for the gateway [default: 127.0.0.1:3000].
     #[arg(long, env = "KOTATSU_LISTEN")]
     listen: Option<SocketAddr>,
 
@@ -44,11 +44,11 @@ struct Cli {
     #[arg(long, env = "KOTATSU_IMAGE")]
     image: Option<String>,
 
-    /// Application port inside each MicroVM.
+    /// Application port inside each MicroVM [default: 8080].
     #[arg(long, env = "KOTATSU_APP_PORT")]
     app_port: Option<u16>,
 
-    /// Unassigned warm VMs kept ready.
+    /// Unassigned warm VMs kept ready [default: 4].
     #[arg(long, env = "KOTATSU_WARM_SIZE")]
     warm_size: Option<usize>,
 
@@ -58,29 +58,31 @@ struct Cli {
     #[arg(long, env = "KOTATSU_WARM_SCHEDULE", value_parser = parse_warm_window, value_delimiter = ',')]
     warm_schedule: Vec<kotatsu::WarmWindow>,
 
-    /// Hard cap on pool-managed VMs.
+    /// Hard cap on pool-managed VMs [default: 100].
     #[arg(long, env = "KOTATSU_MAX_VMS")]
     max_vms: Option<usize>,
 
-    /// Terminate VMs older than this (seconds; 0 = disable).
+    /// Terminate VMs older than this (seconds; 0 = disable) [default: 0].
     #[arg(long, env = "KOTATSU_MAX_AGE_SECS")]
     max_age_secs: Option<u64>,
 
     /// Suspend a VM after this many idle seconds (60-28800; 0 = off: VMs
-    /// run without an idle policy and are not auto-suspended).
+    /// run without an idle policy and are not auto-suspended) [default: 0].
     #[arg(long, env = "KOTATSU_IDLE_SUSPEND_SECS")]
     idle_suspend_secs: Option<u64>,
 
-    /// Terminate a suspended VM after this many seconds (max 28800).
+    /// Terminate a suspended VM after this many seconds (max 28800)
+    /// [default: 28800].
     #[arg(long, env = "KOTATSU_SUSPENDED_TTL_SECS")]
     suspended_ttl_secs: Option<u64>,
 
-    /// Max seconds a request waits for a suspended VM to resume.
+    /// Max seconds a request waits for a suspended VM to resume
+    /// [default: 120].
     #[arg(long, env = "KOTATSU_WAIT_TIMEOUT_SECS")]
     wait_timeout_secs: Option<u64>,
 
     /// Value for `x-forwarded-proto` upstream (set `https` behind a
-    /// TLS-terminating load balancer).
+    /// TLS-terminating load balancer) [default: http].
     #[arg(long, env = "KOTATSU_FORWARDED_PROTO")]
     forwarded_proto: Option<String>,
 
@@ -89,7 +91,7 @@ struct Cli {
     #[arg(long, env = "KOTATSU_MOCK_ENDPOINT", requires = "mock")]
     mock_endpoint: Option<String>,
 
-    /// Maintenance tick in seconds.
+    /// Maintenance tick in seconds [default: 60].
     #[arg(long, env = "KOTATSU_MAINTENANCE_SECS")]
     maintenance_secs: Option<u64>,
 
@@ -734,6 +736,42 @@ mod tests {
         assert!(allow(&["kotatsud"], true));
         assert!(allow(&["kotatsud", "--allow-unauthenticated"], false));
         assert!(!allow(&["kotatsud"], false));
+    }
+
+    #[test]
+    fn help_states_the_defaults() {
+        use clap::CommandFactory;
+        let cfg = Resolved::resolve(&parse_cli(&["kotatsud"]), &FileConfig::default()).unwrap();
+        let secs = |d: Option<Duration>| d.map_or(0, |d| d.as_secs()).to_string();
+        let cmd = Cli::command();
+        for (id, default) in [
+            ("listen", cfg.listen.to_string()),
+            ("app_port", cfg.app_port.to_string()),
+            ("warm_size", cfg.warm_size.to_string()),
+            ("max_vms", cfg.max_vms.to_string()),
+            ("max_age_secs", secs(cfg.max_age)),
+            ("idle_suspend_secs", secs(cfg.idle_suspend)),
+            (
+                "suspended_ttl_secs",
+                kotatsu::MAX_DURATION_SECONDS.to_string(),
+            ),
+            (
+                "wait_timeout_secs",
+                kotatsu::WaitPolicy::default().timeout.as_secs().to_string(),
+            ),
+            ("forwarded_proto", cfg.forwarded_proto.clone()),
+            ("maintenance_secs", secs(Some(cfg.maintenance_interval))),
+        ] {
+            let arg = cmd.get_arguments().find(|a| a.get_id() == id).unwrap();
+            let help = arg.get_help().unwrap().to_string();
+            assert!(
+                help.contains(&format!("[default: {default}]")),
+                "{id}: {help}"
+            );
+        }
+        // Unset, these two fall back to the values checked above.
+        assert_eq!(cfg.suspended_ttl, None);
+        assert_eq!(cfg.wait_timeout, None);
     }
 
     #[test]

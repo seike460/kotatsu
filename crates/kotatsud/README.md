@@ -17,7 +17,8 @@ through `KOTATSU_API_KEYS` / `KOTATSU_TENANT_KEYS` or the config file
 rather than `--api-key` / `--tenant-key`: other users on the host can
 read a process's command-line arguments.
 
-`kotatsud --help` lists every flag with its environment variable.
+`kotatsud --help` lists every flag with its environment variable and
+its default, if any.
 `GET /healthz` and `GET /metrics` (Prometheus) share the listen socket
 without authentication. The metric names are documented in
 `kotatsu::metrics::names`.

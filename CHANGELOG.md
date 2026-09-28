@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allow_unauthenticated = true` in the config file, as other flags do.
   Before, the flag and the file were OR-ed, so the file's `true` could
   not be turned off.
+- Docs: `kotatsud --help` shows the default of each flag that has one,
+  such as `--listen` (`127.0.0.1:3000`) and `--app-port` (`8080`).
 
 ### Changed
 
