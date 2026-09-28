@@ -755,6 +755,109 @@ mod tests {
     }
 
     #[test]
+    fn config_file_values_resolve() {
+        let file = parse_config(
+            r#"
+            max_age = "1h"
+            maintenance_interval = "30s"
+            suspended_ttl = "0s"
+            reap_lost_vms = true
+            api_keys = [" k1 "]
+            tenant_keys = ["alice=k2"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
+        assert_eq!(cfg.maintenance_interval, Duration::from_secs(30));
+        assert_eq!(cfg.suspended_ttl, Some(Duration::ZERO));
+        assert!(cfg.reap_lost_vms);
+        assert_eq!(cfg.api_keys, ["k1"]);
+        assert_eq!(cfg.tenant_keys, [("alice".to_owned(), "k2".to_owned())]);
+
+        // A flag wins over the file, and `--api-key` replaces only the
+        // `api_keys` list.
+        let cli = Cli::try_parse_from(["kotatsud", "--api-key", "cli", "--maintenance-secs", "5"])
+            .unwrap();
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        assert_eq!(cfg.api_keys, ["cli"]);
+        assert_eq!(cfg.tenant_keys.len(), 1);
+        assert_eq!(cfg.maintenance_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn config_file_rejects_bad_entries() {
+        let err = parse_config("warm_sise = 4").err().unwrap();
+        assert!(err.contains("unknown field `warm_sise`"), "{err}");
+        // Durations are strings; the flags take the whole seconds.
+        assert!(parse_config("max_age = 3600").is_err());
+        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        for bad in [
+            r#"warm_schedule = ["9-18=2"]"#,
+            r#"tenant_keys = ["bad tenant=s3cret"]"#,
+        ] {
+            let file = parse_config(bad).unwrap();
+            let err = Resolved::resolve(&cli, &file).err().unwrap().to_string();
+            assert!(!err.contains("s3cret"), "{bad:?} leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_each_invalid_setting() {
+        let valid = || {
+            let cli =
+                Cli::try_parse_from(["kotatsud", "--image", "img", "--api-key", "k"]).unwrap();
+            Resolved::resolve(&cli, &FileConfig::default()).unwrap()
+        };
+        assert!(valid().validate().is_ok());
+
+        let rejected: &[(&str, fn(&mut Resolved))] = &[
+            ("--image", |c| c.image = None),
+            ("no API keys", |c| c.api_keys.clear()),
+            ("empty API key", |c| c.api_keys.push(" ".into())),
+            ("--app-port", |c| c.app_port = 0),
+            ("--idle-suspend-secs", |c| {
+                c.idle_suspend = Some(Duration::from_secs(59));
+            }),
+            ("--idle-suspend-secs", |c| {
+                c.idle_suspend = Some(Duration::from_secs(28_801));
+            }),
+            ("--suspended-ttl-secs", |c| {
+                c.suspended_ttl = Some(Duration::from_secs(28_801));
+            }),
+        ];
+        for (i, (want, change)) in rejected.iter().enumerate() {
+            let mut cfg = valid();
+            change(&mut cfg);
+            let err = cfg.validate().err().unwrap().to_string();
+            assert!(err.contains(want), "case {i}: {err}");
+        }
+
+        let accepted: &[fn(&mut Resolved)] = &[
+            |c| {
+                c.image = None;
+                c.mock = true;
+            },
+            |c| {
+                c.api_keys.clear();
+                c.tenant_keys.push(("alice".into(), "k".into()));
+            },
+            // 0 turns idle suspend off; 60 and 28800 are the bounds.
+            |c| c.idle_suspend = Some(Duration::ZERO),
+            |c| c.idle_suspend = Some(Duration::from_secs(60)),
+            |c| c.idle_suspend = Some(Duration::from_secs(28_800)),
+            |c| c.suspended_ttl = Some(Duration::ZERO),
+            |c| c.suspended_ttl = Some(Duration::from_secs(28_800)),
+        ];
+        for (i, change) in accepted.iter().enumerate() {
+            let mut cfg = valid();
+            change(&mut cfg);
+            assert!(cfg.validate().is_ok(), "case {i}");
+        }
+    }
+
+    #[test]
     fn config_errors_never_quote_the_file() {
         // The file holds API keys, and startup errors reach collected
         // logs: an error gives the position, never the line or value.
