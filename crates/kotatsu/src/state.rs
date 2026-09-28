@@ -28,7 +28,11 @@ pub struct Binding {
     /// owns, not a tenant binding. Stored as an explicit flag (not
     /// inferred from the tenant string) so a tenant name can never be
     /// mistaken for — or forged into — a marker.
-    #[doc(hidden)]
+    ///
+    /// A custom [`StateStore`] must persist and return this flag with
+    /// the row, and compare it in `claim` (see [`ClaimOutcome`]); a
+    /// store that drops it turns markers into tenant bindings, and
+    /// lost VMs are no longer reaped after a restart.
     pub sentinel: bool,
 }
 
@@ -49,8 +53,9 @@ pub enum ClaimOutcome {
 
 /// Atomic store for tenant bindings.
 ///
-/// `claim` is the only mutating write: put-if-absent keeps concurrent
-/// acquires of the same tenant from splitting onto two VMs.
+/// `claim` is the only insert and never overwrites: put-if-absent keeps
+/// concurrent acquires of the same tenant from splitting onto two VMs.
+/// `release` is the only delete, scoped to the expected VM.
 #[async_trait]
 pub trait StateStore: Send + Sync {
     /// Current binding for `tenant`, if any.

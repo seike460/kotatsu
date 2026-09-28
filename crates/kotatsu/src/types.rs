@@ -110,7 +110,7 @@ impl fmt::Debug for TenantKey {
 pub struct MicrovmId(pub(crate) String);
 
 impl MicrovmId {
-    /// Wraps a raw id string without further validation.
+    /// Wraps a raw id string; only an empty id is rejected.
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let id = id.into();
         if id.is_empty() {

@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the pool gauges at their last values.
 - `SandboxPool::drain` logs a failed binding release instead of
   discarding the error; its docs now state that it is best effort.
+- Docs: `Binding::sentinel` is no longer hidden on docs.rs, and states
+  that a custom `StateStore` must persist it and compare it in `claim`.
 
 ### Changed
 
