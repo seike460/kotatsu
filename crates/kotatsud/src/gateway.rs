@@ -283,6 +283,9 @@ fn upstream_query(raw: Option<&str>) -> Option<String> {
 /// strips `Domain`, returning `None` when the result cannot be
 /// expressed safely. All tenants share the gateway host, so a VM's
 /// `Path=/` cookie would otherwise be sent to every other tenant's VM.
+/// `__Host-` cookies are clamped too: browsers then reject them (the
+/// prefix requires `Path=/`), but keeping `Path=/` would share them
+/// across tenants.
 /// The value is decoded lossily — an obs-text/UTF-8 cookie value must
 /// not skip clamping entirely.
 fn clamp_cookie_to_tenant(value: &http::HeaderValue, tenant: &str) -> Option<http::HeaderValue> {

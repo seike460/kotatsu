@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -40,6 +40,15 @@ fn upstream_app() -> Router {
                     .header("set-cookie", "d=4; Path=/t/u1evil")
                     // No Path at all — must gain the tenant prefix.
                     .header("set-cookie", "e=5")
+                    .body(axum::body::Body::from("ok"))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/host-cookie",
+            get(|| async {
+                Response::builder()
+                    .header("set-cookie", "__Host-csrf=1; Secure; Path=/")
                     .body(axum::body::Body::from("ok"))
                     .unwrap()
             }),
@@ -86,6 +95,7 @@ fn upstream_app() -> Router {
                     "port": header(&req, "x-aws-proxy-port"),
                     "custom": header(&req, "x-custom"),
                     "xff": header(&req, "x-forwarded-for"),
+                    "proto": header(&req, "x-forwarded-proto"),
                     "nominated": header(&req, "x-nominated"),
                     "content_length": header(&req, "content-length"),
                     "transfer_encoding": header(&req, "transfer-encoding"),
@@ -570,6 +580,77 @@ async fn websocket_proxy_echoes_through() {
     ));
 }
 
+/// `?key=` is a browser-WebSocket credential only — on a plain HTTP
+/// request it authenticates nothing.
+#[tokio::test]
+async fn query_key_without_websocket_upgrade_is_rejected() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::get(format!("http://{gw}/t/u1/x?key=k1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// A scoped key in `?key=` is still bound to its tenant: it opens its
+/// own tenant's WebSocket and gets 403 on a sibling's.
+#[tokio::test]
+async fn scoped_query_key_cannot_open_another_tenants_websocket() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app_keys(
+        &format!("http://{upstream}"),
+        [(
+            "scoped-u1".to_owned(),
+            Some(HashSet::from(["u1".to_owned()])),
+        )],
+    );
+    let gw = serve(app).await;
+
+    let (_ws, resp) = tokio_tungstenite::connect_async(format!("ws://{gw}/t/u1/ws?key=scoped-u1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 101);
+    let err = tokio_tungstenite::connect_async(format!("ws://{gw}/t/u2/ws?key=scoped-u1"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 403),
+        "{err:?}"
+    );
+}
+
+/// Contract and identity headers a client injects never reach the VM
+/// as sent: the pool's token and port and the gateway's own view of
+/// the peer replace them.
+#[tokio::test]
+async fn client_injected_contract_and_identity_headers_are_replaced() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/x"))
+        .bearer_auth("k1")
+        .header("x-aws-proxy-auth", "forged-token")
+        .header("x-aws-proxy-port", "9999")
+        .header("x-forwarded-for", "6.6.6.6")
+        .header("x-forwarded-proto", "https")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["auth"].as_str().unwrap().starts_with("dev-token-"),
+        "{body}"
+    );
+    assert_eq!(body["port"], "8080");
+    assert_eq!(body["xff"], "127.0.0.1");
+    assert_eq!(body["proto"], "http");
+}
+
 /// All tenants share the gateway origin, so upstream headers that act
 /// on the whole origin must not reach the browser. Other app headers
 /// pass through.
@@ -601,6 +682,27 @@ async fn origin_wide_response_headers_are_stripped() {
         );
     }
     assert_eq!(resp.headers()["x-app"], "kept");
+}
+
+/// A `__Host-` cookie is clamped like any other. Browsers then reject
+/// it (the prefix requires `Path=/`), but keeping `Path=/` would send
+/// it to every tenant.
+#[tokio::test]
+async fn host_prefixed_cookie_is_still_clamped() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/host-cookie"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()["set-cookie"],
+        "__Host-csrf=1; Secure; Path=/t/u1"
+    );
 }
 
 /// A body framed by `Content-Length` keeps that framing upstream — an
@@ -640,6 +742,21 @@ async fn request_body_framing_reaches_the_vm() {
     assert_eq!(chunked["transfer_encoding"], "chunked", "{chunked}");
     assert_eq!(chunked["content_length"], "", "{chunked}");
     assert_eq!(chunked["body"], "part-1,part-2");
+}
+
+/// `allow_unauthenticated` admits a request that carries no key.
+#[tokio::test]
+async fn allow_unauthenticated_admits_requests_without_a_key() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{upstream}")));
+    let mut state = gateway_state(cp, HashMap::new(), pool_config());
+    state.allow_unauthenticated = true;
+    let gw = serve(kotatsud::gateway::router(state)).await;
+
+    let resp = reqwest::get(format!("http://{gw}/t/u1/x")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["path"], "/x");
 }
 
 /// Sends `GET /t/{tenant}/x` with the test key and returns the status
