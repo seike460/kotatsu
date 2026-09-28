@@ -527,13 +527,6 @@ fn sentinel_binding(vm_id: &MicrovmId) -> Binding {
     }
 }
 
-/// True when `b` is a sentinel marker — decided by the explicit flag
-/// the store persists, not the tenant string. A historical tenant that
-/// legitimately used the reserved prefix stays a normal binding.
-fn is_sentinel(b: &Binding) -> bool {
-    b.sentinel
-}
-
 /// True when a `claim` result proves the sentinel marker is persisted
 /// for this VM — `Claimed`, or an earlier *sentinel* pin for the
 /// *same* VM. A `HeldByOther` naming a different VM — or a row that
@@ -1038,7 +1031,7 @@ impl SandboxPool {
             // be resolved — destroy on sight and clear the marker.
             // The row is the durable record, so reaping works even
             // after a restart that lost the in-flight reaper task.
-            if is_sentinel(b) {
+            if b.sentinel {
                 // A reaper/cleanup slot holds the VM — the live task
                 // owns the marker lifecycle (it may be mid-handoff
                 // between pin and release), so the marker is never
@@ -1407,7 +1400,7 @@ impl SandboxPool {
                     .collect();
                 let g = self.inner.lock();
                 let (assigned, lost) = l.iter().fold((0, 0), |(a, s), b| {
-                    if is_sentinel(b) {
+                    if b.sentinel {
                         let held = g.pending.contains_key(&b.microvm_id)
                             || g.warm.iter().any(|v| v.id == b.microvm_id)
                             || normal.contains(&b.microvm_id);
@@ -1520,7 +1513,7 @@ impl SandboxPool {
             .collect();
         let mut g = self.inner.lock();
         let (assigned, lost_unheld) = bindings.iter().fold((0, 0), |(a, l), b| {
-            if is_sentinel(b) {
+            if b.sentinel {
                 let held = g.pending.contains_key(&b.microvm_id)
                     || g.warm.iter().any(|v| v.id == b.microvm_id)
                     || normal.contains(&b.microvm_id);
