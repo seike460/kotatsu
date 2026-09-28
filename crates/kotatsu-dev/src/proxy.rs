@@ -352,7 +352,7 @@ async fn pipe_ws(socket: WebSocket, app_stream: kotatsu::WsStream) {
 fn to_tungstenite(m: AxumMsg) -> TungMsg {
     match m {
         AxumMsg::Text(t) => TungMsg::Text(t.as_str().into()),
-        AxumMsg::Binary(b) => TungMsg::Binary(b.to_vec().into()),
+        AxumMsg::Binary(b) => TungMsg::Binary(b),
         AxumMsg::Close(c) => {
             TungMsg::Close(
                 c.map(|f| tokio_tungstenite::tungstenite::protocol::CloseFrame {
@@ -361,21 +361,23 @@ fn to_tungstenite(m: AxumMsg) -> TungMsg {
                 }),
             )
         }
-        AxumMsg::Ping(p) => TungMsg::Ping(p.to_vec().into()),
-        AxumMsg::Pong(p) => TungMsg::Pong(p.to_vec().into()),
+        AxumMsg::Ping(p) => TungMsg::Ping(p),
+        AxumMsg::Pong(p) => TungMsg::Pong(p),
     }
 }
 
 fn to_axum(m: TungMsg) -> AxumMsg {
     match m {
         TungMsg::Text(t) => AxumMsg::Text(t.as_str().into()),
-        TungMsg::Binary(b) => AxumMsg::Binary(b.to_vec().into()),
+        TungMsg::Binary(b) => AxumMsg::Binary(b),
         TungMsg::Close(c) => AxumMsg::Close(c.map(|f| axum::extract::ws::CloseFrame {
             code: f.code.into(),
             reason: f.reason.as_str().into(),
         })),
-        TungMsg::Ping(p) => AxumMsg::Ping(p.to_vec().into()),
-        TungMsg::Pong(p) => AxumMsg::Pong(p.to_vec().into()),
-        TungMsg::Frame(_) => AxumMsg::Binary(Vec::new().into()),
+        TungMsg::Ping(p) => AxumMsg::Ping(p),
+        TungMsg::Pong(p) => AxumMsg::Pong(p),
+        // Raw frames are filtered out by the read loop, so this arm is
+        // unreachable — kept only to satisfy the exhaustive match.
+        TungMsg::Frame(_) => AxumMsg::Binary(Default::default()),
     }
 }

@@ -164,8 +164,7 @@ impl Shared {
     }
 
     /// POSTs a lifecycle hook to the app under `hook_timeout`. 2xx = ok;
-    /// 404/405/501 = "hook not implemented" → ok (hooks are optional —
-    /// generic servers answer POST with 501 rather than 404/405).
+    /// a "not implemented" status (`hook_not_implemented`) → ok.
     pub async fn call_hook(
         &self,
         name: &str,
@@ -184,10 +183,7 @@ impl Shared {
         .map_err(|_| format!("{name} hook timed out"))?
         .map_err(|e| format!("{name} hook connect failed: {e}"))?;
         let s = resp.status();
-        if s == StatusCode::NOT_FOUND
-            || s == StatusCode::METHOD_NOT_ALLOWED
-            || s == StatusCode::NOT_IMPLEMENTED
-        {
+        if hook_not_implemented(s) {
             // "not implemented" statuses — distinguishable from a real
             // hook only in the debug log.
             tracing::debug!(hook = name, status = %s, "hook skipped (not implemented)");
@@ -264,6 +260,14 @@ impl Shared {
             }
         }
     }
+}
+
+/// 404/405/501 mean "hook not implemented": hooks are optional, and
+/// generic servers answer an unknown POST with 501 rather than 404/405.
+fn hook_not_implemented(s: StatusCode) -> bool {
+    s == StatusCode::NOT_FOUND
+        || s == StatusCode::METHOD_NOT_ALLOWED
+        || s == StatusCode::NOT_IMPLEMENTED
 }
 
 /// A running emulator — the local stand-in for one MicroVM endpoint.
@@ -352,14 +356,8 @@ impl Emulator {
                         .await;
                         match probe {
                             Ok(Ok(r)) if r.status().is_success() => return Ok(()),
-                            Ok(Ok(r))
-                                if r.status() == StatusCode::NOT_FOUND
-                                    || r.status() == StatusCode::METHOD_NOT_ALLOWED
-                                    || r.status() == StatusCode::NOT_IMPLEMENTED =>
-                            {
-                                // Hook not implemented → app is ready.
-                                return Ok(());
-                            }
+                            // Hook not implemented → app is ready.
+                            Ok(Ok(r)) if hook_not_implemented(r.status()) => return Ok(()),
                             Ok(Ok(_)) | Ok(Err(_)) => {
                                 tokio::time::sleep(shared.cfg.ready_poll).await
                             }
