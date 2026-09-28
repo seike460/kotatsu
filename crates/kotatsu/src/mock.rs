@@ -1,4 +1,6 @@
-//! In-memory [`ControlPlane`] implementation for tests and `kotatsu dev`.
+//! In-memory [`ControlPlane`] implementation for tests and
+//! `kotatsud --mock` (whose `--mock-endpoint` can point at the
+//! `kotatsu dev` emulator).
 
 use async_trait::async_trait;
 use parking_lot::Mutex;

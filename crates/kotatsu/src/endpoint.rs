@@ -261,8 +261,8 @@ impl MicrovmEndpoint {
 ///
 /// The token value is embedded in [`WsRequest::subprotocols`], which is
 /// exactly what browsers would send — but it is still a credential, so
-/// `Debug` redacts the URL (which contains no secret anyway, since the
-/// token lives only in the subprotocol list).
+/// `Debug` redacts the subprotocol list. The URL carries no secret and
+/// is shown.
 pub struct WsRequest {
     url: Url,
     protocols: Vec<String>,

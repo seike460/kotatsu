@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code and message (or the transport cause) instead of only
   "service error" / "dispatch failure", so `%e` logs show why a call
   failed (e.g. `AccessDeniedException`).
+- Docs: `PoolReport::reaped` and `kotatsu_pool_reaped_total` also count
+  sentinel-marked and lost VMs, not only `max_age` expiries.
 
 ### Changed
 

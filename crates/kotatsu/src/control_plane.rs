@@ -33,8 +33,9 @@ pub trait ControlPlane: Send + Sync {
     ) -> Result<Vec<MicrovmSummary>>;
     /// Mints a JWE auth token for traffic to a MicroVM (`create-microvm-auth-token`).
     ///
-    /// Returns the raw `X-aws-proxy-auth` header value. The caller decides the
-    /// port scope; `ttl` is capped at [`crate::MAX_TOKEN_TTL_MINUTES`].
+    /// Returns an [`AuthToken`] whose [`AuthToken::header_value`] is the
+    /// `X-aws-proxy-auth` value. The caller decides the port scope;
+    /// `ttl_minutes` is capped at [`crate::MAX_TOKEN_TTL_MINUTES`].
     async fn mint_token(
         &self,
         id: &MicrovmId,

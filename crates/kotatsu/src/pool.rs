@@ -201,7 +201,9 @@ impl WarmWindow {
 pub struct PoolReport {
     /// New VMs launched to top up the warm set.
     pub warmed: usize,
-    /// VMs terminated for exceeding `max_age`.
+    /// VMs terminated by the reaper: past `max_age`, marked by a
+    /// sentinel binding, or found by the lost-VM reconcile
+    /// ([`PoolConfig::reap_lost_vms`]).
     pub reaped: usize,
     /// Bindings dropped because their VM is gone.
     pub bindings_dropped: usize,
