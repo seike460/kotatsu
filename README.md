@@ -74,9 +74,9 @@ kotatsu serve -- <kotatsud への引数>                    # exec 委譲
 ## kotatsud
 
 ```console
+KOTATSU_API_KEYS="$OPERATOR_KEY" \
 kotatsud --listen 0.0.0.0:9000 \
          --image arn:aws:lambda:…:microvm-image:my-sandbox \
-         --api-key "$OPERATOR_KEY" \
          --warm-size 4 --max-vms 200 \
          --warm-schedule 09:00-18:00=16 --warm-schedule 22:00-06:00=2 \
          --idle-suspend-secs 300 --suspended-ttl-secs 28800 \
@@ -88,14 +88,16 @@ kotatsud --listen 0.0.0.0:9000 \
 - `GET /healthz` / `GET /metrics`(無認証 — プライベート bind または前面で保護してください)
 - 中断しても SQLite に binding が残り、再起動後も同じ tenant → VM に戻ります
 - `--mock --mock-endpoint URL` で実 AWS なしの開発ができます
-- TOML 設定ファイル(`--config`)対応、未知フィールドは拒否
+- TOML 設定ファイル(`--config`)対応、未知フィールドは拒否。キーの一覧と例は [crates/kotatsud/README.md](crates/kotatsud/README.md#config-file) にあります
 - `--warm-schedule HH:MM-HH:MM=N`(UTC・繰り返し可・`24:00` 終端可・`22:00-06:00` で日跨ぎ)で時間帯別の warm サイズ。縮退時は超過 warm VM を terminate します
 
 ## セキュリティモデル
 
 - kotatsud 自体は平文 HTTP です。**公開 bind では必ず TLS 終端(LB/リバースプロキシ)を前段に置いてください**。loopback 以外への bind では起動時に警告を出します
+- API キーには長いランダムな値(例: `openssl rand -hex 32`)を使い、コマンドライン引数ではなく `KOTATSU_API_KEYS`・`KOTATSU_TENANT_KEYS` か `--config` のファイルで渡してください。引数は同じホストのほかのユーザーが `ps` で読めます
 - クライアントの `Authorization`・`?key=`・`Connection` 指名・hop-by-hop ヘッダは upstream に流しません
 - tenant 境界: `--tenant-key` のスコープ付きキーは自 tenant の `/t/*` にしか届きません。上流の `Set-Cookie` は `Path` を `/t/{tenant}` 以下に書き換え `Domain` を除去するので、Cookie が tenant をまたぎません(Path を無視する非ブラウザクライアントには効きません — その場合は tenant ごとの host を使ってください)
+- `__Host-` で始まる Cookie は `Path=/` が必須なので、`Path` を書き換えた後はブラウザが保存しません。tenant のアプリでは `__Host-` 接頭辞を使わないでください(`__Secure-` は使えます)
 - 全 tenant が同じ origin を共有するので、origin 全体に効く上流の応答ヘッダ(`Strict-Transport-Security`・`Alt-Svc`・`Service-Worker-Allowed`・`Clear-Site-Data`・`NEL`・`Report-To`)はクライアントに返しません
 - ブラウザ WS 用 `?key=` は TLS 前段の access log や APM に残り得ます。短命のスコープ付きキーを使うか、前段で query を記録しない設定にしてください
 - `x-forwarded-for` はクライアントの ConnectInfo から、`x-forwarded-proto` は `--forwarded-proto` 設定値からゲートウェイが生成します
@@ -130,8 +132,9 @@ cargo run   --example warm_pool -p kotatsu   # Mock 上の warm pool デモ
 
 ```console
 docker build -t kotatsu .
-docker run -p 9000:9000 -v kotatsu-data:/var/lib/kotatsu kotatsu \
-    --listen 0.0.0.0:9000 --image arn:… --api-key "$KEY"
+export KOTATSU_API_KEYS="$KEY"   # -e に値を書かず、この環境変数を渡す
+docker run -p 9000:9000 -e KOTATSU_API_KEYS -v kotatsu-data:/var/lib/kotatsu kotatsu \
+    --listen 0.0.0.0:9000 --image arn:…
 docker run --entrypoint kotatsu kotatsu vm list   # CLI も同梱
 ```
 

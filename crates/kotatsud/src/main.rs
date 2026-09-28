@@ -1,11 +1,13 @@
 //! kotatsud — session gateway daemon for AWS Lambda MicroVM sandboxes.
 //!
-//! One public HTTPS endpoint in front of N MicroVMs: it authenticates
+//! One plain-HTTP endpoint in front of N MicroVMs: it authenticates
 //! clients (Bearer API key), resolves tenant→MicroVM affinity through
 //! `SandboxPool`, holds requests while a suspended VM resumes, injects
 //! `X-aws-proxy-auth`/`X-aws-proxy-port`, and proxies HTTP and WebSocket
-//! traffic. `/metrics` exposes the pool/gateway Prometheus series —
-//! it shares the `--listen` socket unauthenticated; bind privately.
+//! traffic. It does not terminate TLS — on a public bind, put a
+//! TLS-terminating load balancer before it. `/metrics` exposes the
+//! pool/gateway Prometheus series — it shares the `--listen` socket
+//! unauthenticated; bind privately.
 //!
 //! `--mock` needs `--mock-endpoint` (e.g. a kotatsu-dev emulator or any
 //! local upstream) for proxied requests to reach a real socket.
@@ -110,13 +112,15 @@ struct Cli {
     /// Client API keys (repeat or comma-separate via env).
     /// Clients pass `Authorization: Bearer <key>` (or `?key=` for
     /// browser WebSockets). Global keys reach every tenant — prefer
-    /// --tenant-key for untrusted callers.
+    /// --tenant-key for untrusted callers. Prefer the env var or
+    /// --config: other local users can read command-line arguments.
     #[arg(long = "api-key", env = "KOTATSU_API_KEYS", value_delimiter = ',')]
     api_keys: Vec<String>,
 
     /// Tenant-scoped API key: `TENANT=KEY` (repeatable). The key only
     /// authorizes requests under `/t/{TENANT}` — a leaked scoped key
-    /// cannot pivot to other tenants.
+    /// cannot pivot to other tenants. Prefer the env var or --config:
+    /// other local users can read command-line arguments.
     #[arg(
         long = "tenant-key",
         env = "KOTATSU_TENANT_KEYS",
@@ -655,6 +659,25 @@ mod tests {
                 .unwrap()
                 .reap_lost_vms
         );
+    }
+
+    #[test]
+    fn readme_config_example_is_accepted() {
+        // Unknown keys fail startup, so a renamed field must not leave
+        // the documented example behind.
+        let toml = include_str!("../README.md")
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("README has a toml block");
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.idle_suspend, Some(Duration::from_secs(300)));
+        assert_eq!(cfg.wait_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(cfg.warm_schedule.len(), 2);
+        assert_eq!(cfg.tenant_keys.len(), 1);
     }
 
     #[test]

@@ -79,7 +79,7 @@ kotatsu は「テナントが来たら温かい microVM がすぐ用意され、
 | crate / bin | 役割 |
 |---|---|
 | `kotatsu` | 組込みコアライブラリ。`SandboxPool` / `Sandbox` / `MicrovmEndpoint` / `TokenVending` を型付きで提供。自分のサービスに直接組める |
-| `kotatsud` | 常駐ゲートウェイデーモン。単一 HTTPS エンドポイントとして立ち、テナント → microVM を解決して中継 |
+| `kotatsud` | 常駐ゲートウェイデーモン。単一の HTTP エンドポイントとして立ち(TLS は前段で終端)、テナント → microVM を解決して中継 |
 | `kotatsu`(CLI) | `vm` / `token` / `image` / `tag` / `dev` / `cost` / `serve` サブコマンド。warm pool の操作面は `kotatsud` に内包される(CLI からは `serve` で起動するだけ) |
 | `kotatsu-dev` | ローカルエミュレーションモード(下記) |
 

@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - kotatsud forwards the request `Content-Length` when the client framed
   the body by length. Before, every upload reached the VM chunked and
   the body of a GET request was dropped.
+- Docs: kotatsud serves plain HTTP. Its crate README, module docs and
+  CONCEPT.md no longer call it an HTTPS endpoint.
+- Docs: the kotatsud crate README lists the config-file keys with their
+  flags, value formats and defaults. It used to point to a reference
+  that did not exist.
+- Docs: README examples pass API keys through `KOTATSU_API_KEYS`
+  instead of `--api-key` and recommend long random keys. The
+  `--api-key` / `--tenant-key` help recommends the env var or
+  `--config`, since other local users can read command-line arguments.
+- Docs: README states that `__Host-` cookies do not survive the tenant
+  path clamp.
 
 ### Changed
 
