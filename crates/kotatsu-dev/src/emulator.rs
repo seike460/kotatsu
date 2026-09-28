@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{any, get, post};
 use serde::Serialize;
 use tokio::sync::watch;
@@ -460,23 +460,38 @@ async fn state_handler(State(s): State<Arc<Shared>>) -> axum::Json<StateBody> {
     })
 }
 
-async fn suspend_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.suspend().await {
-        Ok(()) => (StatusCode::OK, "suspended".into()),
-        Err(e) => (StatusCode::CONFLICT, e),
-    }
+async fn suspend_handler(State(s): State<Arc<Shared>>, headers: HeaderMap) -> (StatusCode, String) {
+    control(&headers, s.suspend(), "suspended").await
 }
 
-async fn resume_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.resume().await {
-        Ok(()) => (StatusCode::OK, "running".into()),
-        Err(e) => (StatusCode::CONFLICT, e),
-    }
+async fn resume_handler(State(s): State<Arc<Shared>>, headers: HeaderMap) -> (StatusCode, String) {
+    control(&headers, s.resume(), "running").await
 }
 
-async fn terminate_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.terminate().await {
-        Ok(()) => (StatusCode::OK, "terminated".into()),
+async fn terminate_handler(
+    State(s): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    control(&headers, s.terminate(), "terminated").await
+}
+
+/// Runs a control transition: 200 on success, 409 with the reason
+/// otherwise. Browsers attach `Origin` to every POST, so refusing it
+/// keeps a web page from driving this unauthenticated API (CSRF);
+/// curl and other operator tools send none.
+async fn control(
+    headers: &HeaderMap,
+    op: impl std::future::Future<Output = Result<(), String>>,
+    done: &str,
+) -> (StatusCode, String) {
+    if headers.contains_key(header::ORIGIN) {
+        return (
+            StatusCode::FORBIDDEN,
+            "control API refuses browser (Origin) requests".into(),
+        );
+    }
+    match op.await {
+        Ok(()) => (StatusCode::OK, done.into()),
         Err(e) => (StatusCode::CONFLICT, e),
     }
 }

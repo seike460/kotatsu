@@ -548,3 +548,23 @@ async fn failed_boot_reports_state_and_answers_500() {
         .unwrap();
     assert_eq!(resp.status(), 500);
 }
+
+/// Browsers attach `Origin` to every POST: a web page must not drive
+/// the unauthenticated control API (CSRF).
+#[tokio::test]
+async fn control_api_refuses_browser_origin() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+
+    for route in ["suspend", "resume", "terminate"] {
+        let r = client()
+            .post(format!("{ep}/_kotatsu/{route}"))
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{route}");
+    }
+    assert_eq!(emu.state(), DevState::Running);
+    assert_eq!(hooks.calls.lock().clone(), vec!["validate", "run"]);
+}

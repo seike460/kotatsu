@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key or a wrong value type printed the whole line, and serde's type
   errors printed the value, so an API key could reach the startup
   error and the logs that collect it.
+- The `kotatsu dev` control routes (`POST /_kotatsu/suspend`,
+  `/resume`, `/terminate`) refuse a request that carries `Origin` with
+  403. Browsers send `Origin` with every POST, so any web page the
+  developer opened could suspend or terminate the local emulator
+  (CSRF). curl and other tools send no `Origin` and are not affected.
 
 ### Fixed
 
