@@ -1,5 +1,5 @@
-//! `kotatsu dev` as a process: shutdown signals and the app's
-//! `/terminate` hook.
+//! `kotatsu dev` as a process: shutdown signals, the app's `/terminate`
+//! hook, and the non-loopback bind warning.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -151,4 +151,37 @@ fn failed_terminate_hook_is_reported() {
         stderr.contains("warning: terminate hook returned 500"),
         "{stderr}"
     );
+}
+
+#[test]
+fn non_loopback_listen_warns() {
+    // TEST-NET-1 is not assigned to any interface, so the bind fails
+    // after the warning instead of exposing anything.
+    let stderr = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_kotatsu"))
+            .args([
+                "dev",
+                "--app-url",
+                "http://127.0.0.1:9",
+                "--listen",
+                "192.0.2.1:0",
+            ])
+            .args(extra)
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let warning = "warning: --listen 192.0.2.1:0 is not a loopback address";
+
+    let with_mock_tokens = stderr(&[]);
+    assert!(with_mock_tokens.contains(warning), "{with_mock_tokens}");
+    assert!(
+        with_mock_tokens.contains("dev-token-*"),
+        "{with_mock_tokens}"
+    );
+
+    let without = stderr(&["--no-mock-tokens", "--token", "t"]);
+    assert!(without.contains(warning), "{without}");
+    assert!(!without.contains("dev-token-*"), "{without}");
 }

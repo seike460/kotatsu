@@ -913,6 +913,18 @@ async fn dev(c: DevCmd) -> anyhow::Result<()> {
     if c.no_mock_tokens && c.tokens.is_empty() {
         eprintln!("warning: --no-mock-tokens with no --token means no token is accepted");
     }
+    if !c.listen.ip().is_loopback() {
+        eprintln!(
+            "warning: --listen {} is not a loopback address: anyone who can reach it can use \
+             the unauthenticated /_kotatsu/* control API{}",
+            c.listen,
+            if c.no_mock_tokens {
+                ""
+            } else {
+                ", and reach the app with any `dev-token-*` X-aws-proxy-auth value"
+            }
+        );
+    }
     let mut cfg = EmulatorConfig::new(c.app_url);
     cfg.app_port = c.app_port;
     cfg.listen = c.listen;

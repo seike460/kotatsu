@@ -105,7 +105,7 @@ kotatsud --listen 0.0.0.0:9000 \
 - `x-forwarded-for` はクライアントの ConnectInfo から、`x-forwarded-proto` は `--forwarded-proto` 設定値からゲートウェイが生成します
 - `AuthToken` は Debug 出力で `<redacted>`、TTL ≤60 分(既定 30 分)・ポートスコープ付きで最小化します
 - `--allow-unauthenticated` は loopback bind または `--mock` のときしか起動できません(公開 bind + 実 AWS + 無認証は起動を拒否)
-- `kotatsu dev` の `/_kotatsu/*` 制御 API は無認証の dev 用です。ブラウザで開いたページからの CSRF を防ぐため、`Origin` ヘッダの付いた POST は 403 で拒否します。gateway 連鎖経由ではテナント認証で到達可能になるので、本番エンドポイントとしては露出しないでください
+- `kotatsu dev` の `/_kotatsu/*` 制御 API は無認証の dev 用です。ブラウザで開いたページからの CSRF を防ぐため、`Origin` ヘッダの付いた POST は 403 で拒否します。gateway 連鎖経由ではテナント認証で到達可能になるので、本番エンドポイントとしては露出しないでください。`--listen` が loopback 以外のときは起動時に警告を出します
 - `/metrics` は無認証なので必ず private bind か認証付き front-door を置いてください
 
 ## Install
