@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use tokio_tungstenite::tungstenite::Message as TungMsg;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::emulator::{DevState, Shared};
 
@@ -40,7 +41,8 @@ const STRIPPED: &[&str] = &[
     "x-aws-proxy-auth",
     "x-aws-proxy-port",
     // The client's WS handshake is answered by the emulator; the app
-    // gets a fresh one without contract fields.
+    // gets a fresh one with the client's other headers (Cookie, Origin,
+    // …) but no subprotocols.
     "sec-websocket-accept",
     "sec-websocket-extensions",
     "sec-websocket-key",
@@ -205,7 +207,7 @@ pub(crate) async fn contract_proxy(State(s): State<Arc<Shared>>, req: Request) -
     if is_ws {
         use axum::extract::FromRequestParts;
         return match WebSocketUpgrade::from_request_parts(&mut parts, &s).await {
-            Ok(ws) => ws_proxy(s, ws, path_q).await,
+            Ok(ws) => ws_proxy(s, ws, &parts.headers, path_q).await,
             Err(rejection) => rejection.into_response(),
         };
     }
@@ -252,7 +254,12 @@ async fn http_proxy(
 
 /// Connects to the app BEFORE answering 101 — a dead app yields a real
 /// 502 instead of an instantly-dead WebSocket (same rule as kotatsud).
-async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Response {
+async fn ws_proxy(
+    s: Arc<Shared>,
+    ws: WebSocketUpgrade,
+    headers: &HeaderMap,
+    path_q: String,
+) -> Response {
     let mut app_url = match s.app.join(&path_q) {
         Ok(u) if u.origin() == s.app.origin() => u,
         _ => return err(StatusCode::BAD_REQUEST, "path escapes the app origin"),
@@ -265,6 +272,16 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
     if app_url.set_scheme(scheme).is_err() {
         return err(StatusCode::BAD_REQUEST, "app url cannot become ws");
     }
+    let mut app_req = match app_url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("app ws request: {e}")),
+    };
+    let nominated = connection_nominated(headers);
+    for (name, value) in headers {
+        if !stripped(name.as_str(), &nominated) {
+            app_req.headers_mut().append(name.clone(), value.clone());
+        }
+    }
     let tls = match kotatsu::ws_tls_connector() {
         Ok(c) => c,
         Err(e) => {
@@ -276,7 +293,7 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
     };
     let app_stream = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio_tungstenite::connect_async_tls_with_config(app_url.as_str(), None, false, Some(tls)),
+        tokio_tungstenite::connect_async_tls_with_config(app_req, None, false, Some(tls)),
     )
     .await
     {

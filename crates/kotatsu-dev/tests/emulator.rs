@@ -568,3 +568,48 @@ async fn control_api_refuses_browser_origin() {
     assert_eq!(emu.state(), DevState::Running);
     assert_eq!(hooks.calls.lock().clone(), vec!["validate", "run"]);
 }
+
+/// The app's WS handshake carries the client's other headers (Cookie
+/// here) but not the contract subprotocols — AWS forwards the request
+/// minus its MicroVM subprotocols.
+#[tokio::test]
+async fn websocket_forwards_client_headers_to_app() {
+    let app = Router::new().route(
+        "/ws",
+        get(
+            |headers: axum::http::HeaderMap, ws: WebSocketUpgrade| async move {
+                let seen = serde_json::json!({
+                    "cookie": headers.get("cookie").and_then(|v| v.to_str().ok()),
+                    "protocol": headers
+                        .get("sec-websocket-protocol")
+                        .and_then(|v| v.to_str().ok()),
+                })
+                .to_string();
+                ws.on_upgrade(move |mut socket| async move {
+                    let _ = socket
+                        .send(axum::extract::ws::Message::Text(seen.into()))
+                        .await;
+                })
+            },
+        ),
+    );
+    let (_emu, ep) = up_with(app, |_| {}).await;
+    let ws_ep = ep.replacen("http://", "ws://", 1);
+
+    let mut req = format!("{ws_ep}/ws").into_client_request().unwrap();
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        "lambda-microvms, lambda-microvms.authentication.dev-token-1, lambda-microvms.port.8080"
+            .parse()
+            .unwrap(),
+    );
+    req.headers_mut().insert("cookie", "sid=1".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    let msg = ws.next().await.unwrap().unwrap();
+    let seen: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(
+        seen,
+        serde_json::json!({"cookie": "sid=1", "protocol": null})
+    );
+}

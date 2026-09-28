@@ -113,6 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /_kotatsu/state` answers `{"state":"FAILED","error":"…"}` after
   a failed boot. Before, only this state was an object
   (`{"state":{"FAILED":"…"}}`) instead of a string.
+- `kotatsu dev` passes the client's headers, such as `Cookie` and
+  `Origin`, on the WebSocket handshake to the app, as AWS does. Before,
+  the app's handshake carried none of them. The contract subprotocols
+  are still removed.
 
 ### Changed
 
