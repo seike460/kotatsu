@@ -120,6 +120,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: kotatsu-dev states what a failed hook does and the
   `/_kotatsu/state` response format, and `DevState::Pending` lists the
   `/validate` hook.
+- `kotatsu dev` also shuts down on SIGTERM (`docker stop`, systemd, an
+  IDE's stop button) and calls the app's `/terminate` hook, as it does
+  on Ctrl-C. Before, SIGTERM ended it at once without the hook.
+- `kotatsu dev` warns when the app's `/terminate` hook fails or does
+  not finish within 10 s at shutdown. Before, the result was discarded.
 - When `kotatsu serve` cannot find `kotatsud`, it points to the GitHub
   Releases tarball and `cargo install --git`. Before, it suggested
   `cargo install --path crates/kotatsud`, which works only inside a

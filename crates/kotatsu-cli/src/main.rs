@@ -938,14 +938,43 @@ async fn dev(c: DevCmd) -> anyhow::Result<()> {
     // anything but Running (Failed, or Terminated via the control API
     // mid-boot) is a dead end.
     match emu.wait_boot().await {
-        kotatsu_dev::DevState::Running => tracing::info!("emulator ready"),
+        kotatsu_dev::DevState::Running => {}
         s => bail!("emulator boot failed: {s}"),
     }
+    let shutdown = shutdown_signal()?;
+    tracing::info!("emulator ready");
     // Run until interrupted, then fire the app's /terminate hook.
-    tokio::signal::ctrl_c().await?;
+    shutdown.await?;
     eprintln!("shutting down — calling the app's /terminate hook");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), emu.terminate()).await;
+    let budget = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(budget, emu.terminate()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("warning: {e}"),
+        Err(_) => eprintln!("warning: the app's /terminate hook did not finish within {budget:?}"),
+    }
     Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM (`docker stop`, systemd and IDE stop
+/// buttons send the latter). The handlers are installed by this call,
+/// not on the first poll.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = std::io::Result<()>>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut int = signal(SignalKind::interrupt())?;
+    let mut term = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = int.recv() => {}
+            _ = term.recv() => {}
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = std::io::Result<()>>> {
+    Ok(tokio::signal::ctrl_c())
 }
 
 fn cost(c: CostArgs) -> anyhow::Result<()> {
