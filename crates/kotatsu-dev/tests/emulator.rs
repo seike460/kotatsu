@@ -92,10 +92,17 @@ async fn serve(app: Router) -> SocketAddr {
 }
 
 async fn up(hooks: Hooks) -> (Emulator, String) {
-    let app = serve(hooks_app(hooks)).await;
+    up_with(hooks_app(hooks), |_| {}).await
+}
+
+/// Boots an emulator in front of `app` (hooks it lacks answer 404, i.e.
+/// "not implemented") after `tweak` adjusts the config.
+async fn up_with(app: Router, tweak: impl FnOnce(&mut EmulatorConfig)) -> (Emulator, String) {
+    let app = serve(app).await;
     let mut cfg = EmulatorConfig::new(format!("http://{app}"));
     cfg.app_port = 8080;
     cfg.ready_poll = Duration::from_millis(10);
+    tweak(&mut cfg);
     let emu = Emulator::start(cfg).await.unwrap();
     assert_eq!(emu.wait_boot().await, DevState::Running);
     let ep = emu.endpoint().to_owned();
@@ -385,4 +392,40 @@ async fn terminate_during_pending_cannot_resurrect() {
     // The late /ready success lands ~500ms — the CAS must refuse it.
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(emu.state(), DevState::Terminated);
+}
+
+/// The app's 3xx and its `Set-Cookie` reach the client unchanged: the
+/// emulator must not follow `Location` itself (a POST 301/302 would
+/// turn into a GET and drop the redirect's cookie).
+#[tokio::test]
+async fn app_redirects_reach_the_client_unfollowed() {
+    let app = Router::new()
+        .route(
+            "/redirect/{code}",
+            post(
+                |axum::extract::Path(code): axum::extract::Path<u16>| async move {
+                    (
+                        axum::http::StatusCode::from_u16(code).unwrap(),
+                        [("location", "/home"), ("set-cookie", "sid=1; Path=/")],
+                    )
+                },
+            ),
+        )
+        .route("/home", any(|| async { "home" }));
+    let (_emu, ep) = up_with(app, |_| {}).await;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    for code in [301, 302, 303, 307, 308] {
+        let resp = authed_post(&http, &format!("{ep}/redirect/{code}"))
+            .body("user=a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), code);
+        assert_eq!(resp.headers()["location"], "/home", "{code}");
+        assert_eq!(resp.headers()["set-cookie"], "sid=1; Path=/", "{code}");
+    }
 }

@@ -270,6 +270,7 @@ impl Emulator {
             state_tx,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             lifecycle: tokio::sync::Mutex::new(()),
             boot: parking_lot::Mutex::new(None),

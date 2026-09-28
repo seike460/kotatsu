@@ -95,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not be turned off.
 - Docs: `kotatsud --help` shows the default of each flag that has one,
   such as `--listen` (`127.0.0.1:3000`) and `--app-port` (`8080`).
+- `kotatsu dev` relays the app's redirects unchanged. Before, the
+  emulator followed a 303, or a 301/302 that answered a POST, itself:
+  the client got the next page fetched as a GET, and the redirect's
+  own `Set-Cookie` never reached it.
 
 ### Changed
 
