@@ -12,7 +12,7 @@ use std::collections::HashMap;
 #[cfg(feature = "sqlite")]
 use tokio_rusqlite::rusqlite::{self, OptionalExtension};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::types::{MicrovmId, TenantKey};
 
 /// A durable tenant→MicroVM affinity record.
@@ -185,8 +185,8 @@ impl SqliteStore {
 }
 
 #[cfg(feature = "sqlite")]
-fn store_err(e: impl std::fmt::Display) -> Error {
-    Error::Store(e.to_string())
+fn store_err(e: impl std::fmt::Display) -> crate::error::Error {
+    crate::error::Error::Store(e.to_string())
 }
 
 #[cfg(feature = "sqlite")]
