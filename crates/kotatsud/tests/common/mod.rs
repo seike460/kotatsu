@@ -27,21 +27,30 @@ pub fn pool_config() -> PoolConfig {
     cfg
 }
 
-/// Gateway router over a `MemoryStore` pool on `cp`, with the given
-/// `key → allowed tenants` map.
-pub fn gateway_router(
+/// Gateway state over a `MemoryStore` pool built from `cfg` on `cp`,
+/// with the given `key → allowed tenants` map.
+pub fn gateway_state(
     cp: Arc<dyn ControlPlane>,
     api_keys: HashMap<String, Option<HashSet<String>>>,
-) -> Router {
-    let pool = Arc::new(SandboxPool::new(cp, Arc::new(MemoryStore::new()), pool_config()).unwrap());
+    cfg: PoolConfig,
+) -> AppState {
+    let pool = Arc::new(SandboxPool::new(cp, Arc::new(MemoryStore::new()), cfg).unwrap());
     let prom = PrometheusBuilder::new().build_recorder();
-    gateway::router(AppState {
+    AppState {
         pool,
         metrics: prom.handle(),
         api_keys,
         allow_unauthenticated: false,
         forwarded_proto: "http".into(),
-    })
+    }
+}
+
+/// Gateway router over [`gateway_state`] with [`pool_config`].
+pub fn gateway_router(
+    cp: Arc<dyn ControlPlane>,
+    api_keys: HashMap<String, Option<HashSet<String>>>,
+) -> Router {
+    gateway::router(gateway_state(cp, api_keys, pool_config()))
 }
 
 /// Spawns `app` on an ephemeral loopback port; returns its address.

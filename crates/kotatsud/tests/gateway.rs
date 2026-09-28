@@ -4,16 +4,18 @@
 
 mod common;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Request, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::{any, get, post};
-use common::{gateway_router, serve};
+use common::{gateway_router, gateway_state, pool_config, serve};
 use futures_util::{SinkExt, StreamExt};
-use kotatsu::mock::MockControlPlane;
+use kotatsu::mock::{MockBehavior, MockControlPlane};
 
 /// Upstream "VM": echoes the auth/port headers and the path+body it saw.
 fn upstream_app() -> Router {
@@ -616,4 +618,77 @@ async fn origin_wide_response_headers_are_stripped() {
         );
     }
     assert_eq!(resp.headers()["x-app"], "kept");
+}
+
+/// Sends `GET /t/{tenant}/x` with the test key and returns the status
+/// and the raw body.
+async fn get_status_and_body(gw: std::net::SocketAddr, tenant: &str) -> (u16, String) {
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/{tenant}/x"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    (resp.status().as_u16(), resp.text().await.unwrap())
+}
+
+/// At `max_vms` a new tenant gets 503 with a fixed body.
+#[tokio::test]
+async fn pool_exhaustion_is_503_with_a_fixed_body() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{upstream}")));
+    let mut cfg = pool_config();
+    cfg.max_vms = 1;
+    let keys = HashMap::from([("k1".to_owned(), None)]);
+    let gw = serve(kotatsud::gateway::router(gateway_state(cp, keys, cfg))).await;
+
+    assert_eq!(get_status_and_body(gw, "u1").await.0, 200);
+    assert_eq!(
+        get_status_and_body(gw, "u2").await,
+        (503, r#"{"error":"no sandbox capacity"}"#.to_owned())
+    );
+}
+
+/// A VM that does not boot within the wait budget gives 504. The body
+/// is fixed — the waiter's error names the MicroVM.
+#[tokio::test]
+async fn wait_timeout_is_504_without_the_microvm_id() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(
+        MockControlPlane::with_behavior(MockBehavior {
+            boot_time: Duration::from_secs(60),
+            ..Default::default()
+        })
+        .endpoint_override(&format!("http://{upstream}")),
+    );
+    let mut cfg = pool_config();
+    cfg.wait.timeout = Duration::from_millis(200);
+    let keys = HashMap::from([("k1".to_owned(), None)]);
+    let gw = serve(kotatsud::gateway::router(gateway_state(cp, keys, cfg))).await;
+
+    assert_eq!(
+        get_status_and_body(gw, "u1").await,
+        (
+            504,
+            r#"{"error":"timed out waiting for the sandbox"}"#.to_owned()
+        )
+    );
+}
+
+/// An unreachable VM endpoint gives 502. The body is fixed — the HTTP
+/// client's error names the endpoint URL.
+#[tokio::test]
+async fn unreachable_vm_is_502_without_the_endpoint_url() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let (app, _cp) = gateway_app(&format!("http://{closed}"));
+    let gw = serve(app).await;
+
+    assert_eq!(
+        get_status_and_body(gw, "u1").await,
+        (502, r#"{"error":"upstream unavailable"}"#.to_owned())
+    );
 }

@@ -188,20 +188,30 @@ fn forbidden() -> Response {
         .expect("403")
 }
 
-fn err_response(e: &Error) -> Response {
-    let status = match e {
-        Error::InvalidInput(_) => StatusCode::BAD_REQUEST,
-        Error::NotFound { .. } => StatusCode::NOT_FOUND,
-        Error::PoolExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
-        Error::WaitTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
-        _ => StatusCode::BAD_GATEWAY,
-    };
-    let body = serde_json::json!({"error": e.to_string()}).to_string();
+fn json_error(status: StatusCode, msg: &str) -> Response {
     Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
+        .body(Body::from(serde_json::json!({"error": msg}).to_string()))
         .expect("error response")
+}
+
+/// Maps a proxy failure to its status and a fixed body. The error's
+/// `Display` can carry the VM endpoint URL, MicroVM IDs and AWS error
+/// details, so it goes to the server log only.
+fn err_response(e: &Error, tenant: &TenantKey) -> Response {
+    let (status, msg) = match e {
+        Error::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid request"),
+        Error::NotFound { .. } => (StatusCode::NOT_FOUND, "sandbox not found"),
+        Error::PoolExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "no sandbox capacity"),
+        Error::WaitTimeout { .. } => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "timed out waiting for the sandbox",
+        ),
+        _ => (StatusCode::BAD_GATEWAY, "upstream unavailable"),
+    };
+    tracing::warn!(%tenant, status = status.as_u16(), error = %e, "proxy request failed");
+    json_error(status, msg)
 }
 
 /// `/t/{tenant}` — proxy to the VM's root path.
@@ -345,7 +355,8 @@ async fn proxy_inner(
         Ok(t) => t,
         Err(e) => {
             kotatsu::metrics::record_http_request(400, start.elapsed());
-            return err_response(&e);
+            // The validation message describes the client's own input.
+            return json_error(StatusCode::BAD_REQUEST, &e.to_string());
         }
     };
     // Tenant authorization: a scoped key may only reach its own tenants.
@@ -395,7 +406,7 @@ async fn acquire_or_err(s: &AppState, tenant: &TenantKey) -> Result<Sandbox, Box
     s.pool
         .acquire(tenant)
         .await
-        .map_err(|e| Box::new(err_response(&e)))
+        .map_err(|e| Box::new(err_response(&e, tenant)))
 }
 
 /// Everything `http_proxy` needs to forward one request.
@@ -431,7 +442,7 @@ async fn http_proxy(s: AppState, a: HttpProxyArgs) -> Response {
         Ok(b) => b,
         Err(e) => {
             kotatsu::metrics::record_http_request(502, start.elapsed());
-            return err_response(&e);
+            return err_response(&e, &tenant);
         }
     };
 
@@ -453,7 +464,7 @@ async fn http_proxy(s: AppState, a: HttpProxyArgs) -> Response {
     let upstream = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            let resp = err_response(&Error::Http(e));
+            let resp = err_response(&Error::Http(e), &tenant);
             kotatsu::metrics::record_http_request(502, start.elapsed());
             return resp;
         }
@@ -500,7 +511,7 @@ async fn ws_proxy(
         Ok(w) => w,
         Err(e) => {
             kotatsu::metrics::record_http_request(502, start.elapsed());
-            return err_response(&e);
+            return err_response(&e, &tenant);
         }
     };
 
@@ -511,17 +522,11 @@ async fn ws_proxy(
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 kotatsu::metrics::record_http_request(502, start.elapsed());
-                return err_response(&e);
+                return err_response(&e, &tenant);
             }
             Err(_) => {
                 kotatsu::metrics::record_http_request(504, start.elapsed());
-                return Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"error": "upstream ws connect timed out"}).to_string(),
-                    ))
-                    .expect("504");
+                return json_error(StatusCode::GATEWAY_TIMEOUT, "upstream ws connect timed out");
             }
         };
 

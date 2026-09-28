@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged. Before, kotatsud followed a VM-supplied `Location` itself —
   fetching internal URLs (SSRF) with `X-aws-proxy-auth` attached — and a
   redirect's own `Set-Cookie` never reached the browser.
+- kotatsud error responses no longer carry internal details. The JSON
+  body is a fixed message per status (e.g. `upstream unavailable`), and
+  the error itself — VM endpoint URL, MicroVM ID, AWS error message —
+  is logged at `warn` with the tenant.
 - kotatsud also strips `Service-Worker-Allowed`, `Clear-Site-Data`,
   `NEL` and `Report-To` from upstream responses, as it already did
   `Strict-Transport-Security` and `Alt-Svc`. All tenants share the
