@@ -429,3 +429,43 @@ async fn app_redirects_reach_the_client_unfollowed() {
         assert_eq!(resp.headers()["set-cookie"], "sid=1; Path=/", "{code}");
     }
 }
+
+/// A `/terminate` hook failing mid-boot must not leave the emulator
+/// `Pending` forever: the boot task is already aborted, so it settles
+/// `Failed` and `wait_boot` returns.
+#[tokio::test]
+async fn terminate_hook_failure_during_boot_settles_failed() {
+    let app = Router::new()
+        .route(
+            &hook("ready"),
+            post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        )
+        .route(
+            &hook("terminate"),
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+    let app_addr = serve(app).await;
+    let mut cfg = EmulatorConfig::new(format!("http://{app_addr}"));
+    cfg.ready_timeout = Duration::from_secs(30);
+    let emu = Emulator::start(cfg).await.unwrap();
+    assert_eq!(emu.state(), DevState::Pending);
+
+    let r = client()
+        .post(format!("{}/_kotatsu/terminate", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    let settled = tokio::time::timeout(Duration::from_secs(5), emu.wait_boot())
+        .await
+        .expect("wait_boot must return");
+    assert_eq!(
+        settled,
+        DevState::Failed("terminate hook returned 500 Internal Server Error".into())
+    );
+    let resp = authed(&client(), &format!("{}/x", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+}

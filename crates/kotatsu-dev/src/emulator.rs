@@ -221,6 +221,9 @@ impl Shared {
     }
 
     /// Drives any live state to `Terminated` and aborts the boot task.
+    /// A failed hook leaves the state as it was, except `Pending`: with
+    /// the boot task aborted nothing would settle it, so it becomes
+    /// `Failed`.
     pub async fn terminate(&self) -> Result<(), String> {
         let _g = self.lifecycle.lock().await;
         if let Some(boot) = self.boot.lock().take() {
@@ -229,12 +232,23 @@ impl Shared {
         match self.dev_state() {
             DevState::Terminated => Ok(()),
             _ => {
-                self.call_hook(
-                    "terminate",
-                    &self.cfg.hooks.terminate,
-                    serde_json::json!({}),
-                )
-                .await?;
+                if let Err(e) = self
+                    .call_hook(
+                        "terminate",
+                        &self.cfg.hooks.terminate,
+                        serde_json::json!({}),
+                    )
+                    .await
+                {
+                    self.state_tx.send_if_modified(|s| {
+                        if !matches!(s, DevState::Pending) {
+                            return false;
+                        }
+                        *s = DevState::Failed(e.clone());
+                        true
+                    });
+                    return Err(e);
+                }
                 self.set_state(DevState::Terminated);
                 Ok(())
             }
@@ -378,7 +392,8 @@ impl Emulator {
         self.shared.dev_state()
     }
 
-    /// Waits for boot to settle (Running or Failed).
+    /// Waits for boot to settle: `Running`, `Failed`, or `Terminated`
+    /// by a terminate during boot.
     pub async fn wait_boot(&self) -> DevState {
         let mut rx = self.shared.state_tx.subscribe();
         let _ = rx.wait_for(|s| !matches!(s, DevState::Pending)).await;

@@ -99,6 +99,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emulator followed a 303, or a 301/302 that answered a POST, itself:
   the client got the next page fetched as a GET, and the redirect's
   own `Set-Cookie` never reached it.
+- `kotatsu dev` no longer hangs when the app's `/terminate` hook fails
+  during boot. The emulator then stayed `PENDING`, answered every
+  request 503 and never finished waiting for boot. It now ends
+  `FAILED`.
 
 ### Changed
 
