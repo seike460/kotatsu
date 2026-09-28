@@ -112,8 +112,11 @@ fn state_liveness() {
     assert!(State::Running.is_live());
     assert!(State::Suspended.is_live());
     assert!(State::Pending.is_live());
+    assert!(State::Suspending.is_live());
     assert!(!State::Terminated.is_live());
     assert!(!State::Terminating.is_live());
+    // An unknown (possibly terminal) state must never receive traffic.
+    assert!(!State::Unknown("FAILED".into()).is_live());
 }
 
 #[tokio::test]

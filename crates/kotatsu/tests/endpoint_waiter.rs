@@ -329,16 +329,18 @@ async fn resume_slower_than_poll_interval_completes() {
 #[tokio::test]
 async fn duplicate_resume_is_idempotent_in_mock() {
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        resume_time: Duration::from_millis(150),
+        resume_time: Duration::from_millis(400),
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     cp.suspend(&vm.id).await.unwrap();
     cp.resume(&vm.id).await.unwrap();
     // A second resume while the transition is armed must not re-arm it.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    // The check lands past the first deadline (100+320 > 400ms) but
+    // before a re-armed one (320 < 400ms after the second call).
+    tokio::time::sleep(Duration::from_millis(100)).await;
     cp.resume(&vm.id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(160)).await;
+    tokio::time::sleep(Duration::from_millis(320)).await;
     assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Running);
 }
 

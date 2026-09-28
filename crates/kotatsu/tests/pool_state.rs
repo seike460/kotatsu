@@ -1006,13 +1006,14 @@ async fn bound_vm_surviving_failed_release_stays_tracked() {
     // `store.release` fails but the binding survives, and `terminate`
     // also fails: the VM must remain bound and tracked — never warm,
     // never dropped.
-    let cp = Arc::new(MockControlPlane::with_behavior(
+    let cp = Arc::new(FlakyControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
             boot_time: Duration::from_secs(3600), // wait fails → cleanup
-            terminate_error: Some("boom".into()),
             ..Default::default()
         },
     ));
+    cp.fail_terminate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let store = Arc::new(FlakyStore::new());
     store
         .fail_release
@@ -1029,10 +1030,20 @@ async fn bound_vm_surviving_failed_release_stays_tracked() {
 
     let t1 = tenant("u1");
     assert!(pool.acquire(&t1).await.is_err());
+    // The cleanup runs detached; its failed terminate is its last step.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cp.terminate_calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("cleanup never tried to terminate the bound VM");
     let bound = store.get(&t1).await.unwrap().unwrap();
     let stats = pool.stats().await;
     assert_eq!(stats.warm, 0, "a bound VM must never be warm");
+    assert_eq!(stats.inflight, 0);
     assert_eq!(stats.assigned, 1, "the binding still tracks the VM");
+    assert_eq!(stats.lost, 0);
     assert_eq!(
         cp.get(&bound.microvm_id).await.unwrap().state,
         State::Pending,
@@ -1542,10 +1553,11 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
 }
 
 #[tokio::test]
-async fn pending_release_frees_capacity_for_other_tenants() {
-    // While a cleanup's release is still pending, the VM is counted
-    // once — via its binding — not as binding+inflight. At
-    // `max_vms=2` another tenant must still get the free slot.
+async fn reserve_waits_for_pending_release_then_succeeds() {
+    // While a cleanup's release is parked, the VM is counted once —
+    // its binding and the cleanup's inflight slot overlap. Another
+    // tenant's reserve waits out the release under the capacity lock,
+    // then gets the free slot at `max_vms=2`.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
             boot_time: Duration::from_millis(50),
@@ -1584,6 +1596,12 @@ async fn pending_release_frees_capacity_for_other_tenants() {
     task.abort();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(store.get(&t1).await.unwrap().is_some());
+    let stats = pool.stats().await;
+    assert_eq!(
+        stats.warm + stats.inflight + stats.assigned + stats.lost,
+        1,
+        "the parked VM must be counted once"
+    );
 
     // managed = warm(0) + inflight(0) + assigned(1) < max_vms(2) — but
     // the capacity lock serializes the binding→inflight handoff, so
