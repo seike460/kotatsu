@@ -222,7 +222,6 @@ async fn terminate_blocks_traffic() {
     let resp = authed(&http, &format!("{ep}/x")).send().await.unwrap();
     assert_eq!(resp.status(), 410);
     assert!(hooks.calls.lock().contains(&"terminate".to_string()));
-    let _ = emu; // server keeps running until dropped
 }
 
 #[tokio::test]
@@ -612,4 +611,65 @@ async fn websocket_forwards_client_headers_to_app() {
         seen,
         serde_json::json!({"cookie": "sid=1", "protocol": null})
     );
+}
+
+/// With `auto_resume` off, traffic to a suspended emulator gets 503 and
+/// does not call `/resume`.
+#[tokio::test]
+async fn suspended_without_auto_resume_returns_503() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up_with(hooks_app(hooks.clone()), |c| c.auto_resume = false).await;
+    emu.suspend().await.unwrap();
+
+    let resp = authed(&client(), &format!("{ep}/x")).send().await.unwrap();
+    assert_eq!(resp.status(), 503);
+    assert_eq!(emu.state(), DevState::Suspended);
+    assert!(!hooks.calls.lock().contains(&"resume".to_string()));
+}
+
+/// `//host/x` must not become a network-path reference off the app's
+/// origin, and a malformed request must not wake a suspended VM.
+#[tokio::test]
+async fn network_path_target_is_400_without_resuming() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+    emu.suspend().await.unwrap();
+
+    let resp = authed(&client(), &format!("{ep}//evil.example/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        resp.text().await.unwrap(),
+        r#"{"error":"bad request target"}"#
+    );
+    assert_eq!(emu.state(), DevState::Suspended);
+    assert!(!hooks.calls.lock().contains(&"resume".to_string()));
+}
+
+/// Only exact method+path pairs are control routes: a wrong method is
+/// 405 without a transition, and other `/_kotatsu/*` paths reach the app.
+#[tokio::test]
+async fn control_routes_match_exact_method_and_path() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+    let http = client();
+
+    let r = http
+        .get(format!("{ep}/_kotatsu/terminate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 405);
+    assert_eq!(emu.state(), DevState::Running);
+    assert!(!hooks.calls.lock().contains(&"terminate".to_string()));
+
+    let r = authed(&http, &format!("{ep}/_kotatsu/other"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["path"], "/_kotatsu/other");
 }
