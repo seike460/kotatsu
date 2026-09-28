@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer panic with "Could not automatically determine the
   process-level CryptoProvider". They use the process-default rustls
   provider when one is installed, else `ring`.
+- `Error::Aws` and `Error::Conflict` messages now include the AWS error
+  code and message (or the transport cause) instead of only
+  "service error" / "dispatch failure", so `%e` logs show why a call
+  failed (e.g. `AccessDeniedException`).
 
 ## [0.1.0] - 2026-09-28
 
