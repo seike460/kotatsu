@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{CloseFrame, Message as AxumMsg, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
@@ -457,7 +457,16 @@ async fn http_proxy(s: AppState, a: HttpProxyArgs) -> Response {
         .header("x-forwarded-for", addr.0.ip().to_string())
         .header("x-forwarded-proto", &s.forwarded_proto);
 
-    let stream = http_body_util::BodyStream::new(req.into_body())
+    // Re-streaming hides the body length, so hyper would send an upload
+    // chunked and drop a GET body. Restore the length the server
+    // decoded when the client framed the body by length.
+    let body = req.into_body();
+    if headers.contains_key(http::header::CONTENT_LENGTH)
+        && let Some(len) = HttpBody::size_hint(&body).exact()
+    {
+        builder = builder.header(http::header::CONTENT_LENGTH, len);
+    }
+    let stream = http_body_util::BodyStream::new(body)
         .try_filter_map(|frame| async move { Ok(frame.into_data().ok()) });
     builder = builder.body(reqwest::Body::wrap_stream(stream));
 

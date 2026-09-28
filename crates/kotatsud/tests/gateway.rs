@@ -17,6 +17,15 @@ use common::{gateway_router, gateway_state, pool_config, serve};
 use futures_util::{SinkExt, StreamExt};
 use kotatsu::mock::{MockBehavior, MockControlPlane};
 
+/// The header's value as text, or `""` when absent.
+fn header(req: &Request, name: &str) -> String {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned()
+}
+
 /// Upstream "VM": echoes the auth/port headers and the path+body it saw.
 fn upstream_app() -> Router {
     Router::new()
@@ -72,52 +81,26 @@ fn upstream_app() -> Router {
         .route(
             "/{*p}",
             any(|req: Request| async move {
-                let auth = req
-                    .headers()
-                    .get("x-aws-proxy-auth")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let port = req
-                    .headers()
-                    .get("x-aws-proxy-port")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let custom = req
-                    .headers()
-                    .get("x-custom")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let xff = req
-                    .headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let nominated = req
-                    .headers()
-                    .get("x-nominated")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let client_auth = req.headers().contains_key("authorization");
-                let path_q = req
-                    .uri()
-                    .path_and_query()
-                    .map(|pq| pq.to_string())
-                    .unwrap_or_default();
+                let mut echoed = serde_json::json!({
+                    "auth": header(&req, "x-aws-proxy-auth"),
+                    "port": header(&req, "x-aws-proxy-port"),
+                    "custom": header(&req, "x-custom"),
+                    "xff": header(&req, "x-forwarded-for"),
+                    "nominated": header(&req, "x-nominated"),
+                    "content_length": header(&req, "content-length"),
+                    "transfer_encoding": header(&req, "transfer-encoding"),
+                    "client_auth": req.headers().contains_key("authorization"),
+                    "path": req
+                        .uri()
+                        .path_and_query()
+                        .map(|pq| pq.to_string())
+                        .unwrap_or_default(),
+                });
                 let body = axum::body::to_bytes(req.into_body(), usize::MAX)
                     .await
                     .unwrap();
-                serde_json::json!({
-                    "auth": auth, "port": port, "custom": custom,
-                    "xff": xff, "nominated": nominated,
-                    "client_auth": client_auth, "path": path_q,
-                    "body": String::from_utf8_lossy(&body),
-                })
-                .to_string()
+                echoed["body"] = String::from_utf8_lossy(&body).into();
+                echoed.to_string()
             }),
         )
 }
@@ -618,6 +601,45 @@ async fn origin_wide_response_headers_are_stripped() {
         );
     }
     assert_eq!(resp.headers()["x-app"], "kept");
+}
+
+/// A body framed by `Content-Length` keeps that framing upstream — an
+/// upload is not turned into chunked, and a GET body is not dropped.
+/// A chunked body stays chunked, and a bodiless GET gains no length.
+#[tokio::test]
+async fn request_body_framing_reaches_the_vm() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::new();
+    let echo = |req: reqwest::RequestBuilder| async move {
+        let resp = req.bearer_auth("k1").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        resp.json::<serde_json::Value>().await.unwrap()
+    };
+
+    let post = echo(http.post(format!("http://{gw}/t/u1/echo")).body("hello")).await;
+    assert_eq!(post["content_length"], "5", "{post}");
+    assert_eq!(post["transfer_encoding"], "", "{post}");
+    assert_eq!(post["body"], "hello");
+
+    let get = echo(http.get(format!("http://{gw}/t/u1/echo")).body("q=1")).await;
+    assert_eq!(get["content_length"], "3", "{get}");
+    assert_eq!(get["body"], "q=1");
+
+    let bodiless = echo(http.get(format!("http://{gw}/t/u1/echo"))).await;
+    assert_eq!(bodiless["content_length"], "", "{bodiless}");
+    assert_eq!(bodiless["transfer_encoding"], "", "{bodiless}");
+
+    let chunks = futures_util::stream::iter([Ok::<_, std::io::Error>("part-1,"), Ok("part-2")]);
+    let chunked = echo(
+        http.post(format!("http://{gw}/t/u1/echo"))
+            .body(reqwest::Body::wrap_stream(chunks)),
+    )
+    .await;
+    assert_eq!(chunked["transfer_encoding"], "chunked", "{chunked}");
+    assert_eq!(chunked["content_length"], "", "{chunked}");
+    assert_eq!(chunked["body"], "part-1,part-2");
 }
 
 /// Sends `GET /t/{tenant}/x` with the test key and returns the status

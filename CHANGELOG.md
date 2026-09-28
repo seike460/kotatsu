@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarding the error; its docs now state that it is best effort.
 - Docs: `Binding::sentinel` is no longer hidden on docs.rs, and states
   that a custom `StateStore` must persist it and compare it in `claim`.
+- kotatsud forwards the request `Content-Length` when the client framed
+  the body by length. Before, every upload reached the VM chunked and
+  the body of a GET request was dropped.
 
 ### Changed
 
