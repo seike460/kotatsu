@@ -362,7 +362,7 @@ async fn terminate_during_pending_cannot_resurrect() {
         .route(
             &hook("ready"),
             post(|| async {
-                tokio::time::sleep(Duration::from_millis(60)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 "late"
             }),
         )
@@ -382,7 +382,7 @@ async fn terminate_during_pending_cannot_resurrect() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    // The late /ready success lands ~60ms — the CAS must refuse it.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    // The late /ready success lands ~500ms — the CAS must refuse it.
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(emu.state(), DevState::Terminated);
 }

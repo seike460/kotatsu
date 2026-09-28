@@ -1560,7 +1560,7 @@ async fn reserve_waits_for_pending_release_then_succeeds() {
     // then gets the free slot at `max_vms=2`.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
-            boot_time: Duration::from_millis(50),
+            boot_time: Duration::from_millis(500),
             ..Default::default()
         },
     ));
@@ -1738,7 +1738,7 @@ async fn cancelled_release_never_shares_vm_with_other_tenant() {
     // the next `maintain` tick.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
-            boot_time: Duration::from_millis(50),
+            boot_time: Duration::from_millis(500),
             ..Default::default()
         },
     ));

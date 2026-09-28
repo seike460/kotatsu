@@ -294,8 +294,10 @@ async fn wss_connect_reaches_the_tls_handshake() {
 
 #[tokio::test]
 async fn wait_for_state_terminated_is_reachable() {
+    // Far wider than scheduler jitter, so the TERMINATING check below
+    // runs inside the window.
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        terminate_time: Duration::from_millis(60),
+        terminate_time: Duration::from_millis(500),
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
