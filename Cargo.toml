@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["full"] }
 # `bundled` links libsqlite3 statically — release binaries and the
 # distroless-ish runtime image stay self-contained (bookworm-slim has
 # no libsqlite3-0).
-tokio-rusqlite = { version = "0.6", features = ["bundled"] }
+tokio-rusqlite = { version = "0.8", features = ["bundled"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "url", "rustls-tls-webpki-roots"] }
 toml = "0.8"
 tracing = "0.1"
