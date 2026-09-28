@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - kotatsud forwards the request `Content-Length` when the client framed
   the body by length. Before, every upload reached the VM chunked and
   the body of a GET request was dropped.
+- kotatsud answers 400 to a request target that starts with `//` or
+  contains a backslash before it resolves the tenant's VM. Before, such
+  a request launched or resumed the VM first and failed afterwards.
 - Docs: kotatsud serves plain HTTP. Its crate README, module docs and
   CONCEPT.md no longer call it an HTTPS endpoint.
 - Docs: the kotatsud crate README lists the config-file keys with their

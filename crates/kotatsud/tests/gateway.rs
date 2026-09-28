@@ -15,6 +15,7 @@ use axum::response::Response;
 use axum::routing::{any, get, post};
 use common::{gateway_router, gateway_state, pool_config, serve};
 use futures_util::{SinkExt, StreamExt};
+use kotatsu::ControlPlane;
 use kotatsu::mock::{MockBehavior, MockControlPlane};
 
 /// The header's value as text, or `""` when absent.
@@ -830,4 +831,34 @@ async fn unreachable_vm_is_502_without_the_endpoint_url() {
         get_status_and_body(gw, "u1").await,
         (502, r#"{"error":"upstream unavailable"}"#.to_owned())
     );
+}
+
+/// A target the VM endpoint rejects anyway (`//…`, a backslash) is 400
+/// before `acquire`: a malformed request must not launch or resume a VM.
+#[tokio::test]
+async fn malformed_target_is_400_without_launching_a_vm() {
+    let upstream = serve(upstream_app()).await;
+    let (app, cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::new();
+
+    for target in ["/t/u1//x", "/t/u1/x?q=a\\b"] {
+        let resp = http
+            .get(format!("http://{gw}{target}"))
+            .bearer_auth("k1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{target}");
+        assert_eq!(
+            resp.text().await.unwrap(),
+            r#"{"error":"invalid request"}"#,
+            "{target}"
+        );
+    }
+    assert!(cp.list(None, None).await.unwrap().is_empty());
+
+    // The same tenant with a valid target does launch a VM.
+    assert_eq!(get_status_and_body(gw, "u1").await.0, 200);
+    assert_eq!(cp.list(None, None).await.unwrap().len(), 1);
 }

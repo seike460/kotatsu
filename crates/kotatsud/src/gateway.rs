@@ -375,6 +375,12 @@ async fn proxy_inner(
         path.push('?');
         path.push_str(&q);
     }
+    // `MicrovmEndpoint` rejects these targets too, but only after
+    // `acquire` — a malformed request must not launch or resume a VM.
+    if path.starts_with("//") || path.contains('\\') {
+        kotatsu::metrics::record_http_request(400, start.elapsed());
+        return json_error(StatusCode::BAD_REQUEST, "invalid request");
+    }
 
     if is_upgrade(&headers) {
         use axum::extract::FromRequestParts;
