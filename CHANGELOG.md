@@ -120,6 +120,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Docs: kotatsu-dev states what a failed hook does and the
   `/_kotatsu/state` response format, and `DevState::Pending` lists the
   `/validate` hook.
+- When `kotatsu serve` cannot find `kotatsud`, it points to the GitHub
+  Releases tarball and `cargo install --git`. Before, it suggested
+  `cargo install --path crates/kotatsud`, which works only inside a
+  clone of the repository.
+- Docs: the kotatsu-cli crate README no longer tells users to
+  `cargo install kotatsu-cli`; the crates are not on crates.io yet. It
+  installs both binaries from GitHub and states that `serve` needs
+  `kotatsud` on `PATH`.
 
 ### Changed
 

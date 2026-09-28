@@ -8,7 +8,7 @@
 //! - `kotatsu tag …` — resource tagging by ARN (list/set/unset)
 //! - `kotatsu dev` — run the local contract emulator (`kotatsu-dev`)
 //! - `kotatsu cost` — offline cost estimate (no AWS calls)
-//! - `kotatsu serve` — hand off to the `kotatsud` gateway daemon
+//! - `kotatsu serve` — hand off to the `kotatsud` gateway daemon on PATH
 
 use std::net::SocketAddr;
 
@@ -48,7 +48,7 @@ enum Cmd {
     Dev(DevCmd),
     /// Offline monthly cost estimate (official us-east-1 rates).
     Cost(CostArgs),
-    /// Run the kotatsud session gateway (execs the kotatsud binary).
+    /// Run the kotatsud session gateway (execs `kotatsud` from PATH).
     ///
     /// Args are forwarded verbatim; clap-owned flags like `--region` or
     /// `--help` must follow `--` to reach kotatsud unambiguously.
@@ -991,18 +991,19 @@ fn serve(args: Vec<String>, region: Option<String>) -> anyhow::Result<()> {
         // True exec: PID, exit status and signals pass through unchanged,
         // and no orphaned kotatsud survives a signal to this process.
         use std::os::unix::process::CommandExt;
-        Err(cmd.exec()).context(
-            "failed to exec `kotatsud` — install it (cargo install --path crates/kotatsud)",
-        )
+        Err(cmd.exec()).context(KOTATSUD_EXEC_FAILED)
     }
     #[cfg(not(unix))]
     {
-        let status = cmd.status().context(
-            "failed to exec `kotatsud` — install it (cargo install --path crates/kotatsud)",
-        )?;
+        let status = cmd.status().context(KOTATSUD_EXEC_FAILED)?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
+
+/// Hint for a missing `kotatsud`; it has to work outside a clone of the
+/// repository.
+const KOTATSUD_EXEC_FAILED: &str = "failed to exec `kotatsud` — install it from the GitHub \
+     Releases tarball or with `cargo install --locked --git https://github.com/seike460/kotatsu kotatsud`";
 
 #[cfg(test)]
 mod tests {

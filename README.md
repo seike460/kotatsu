@@ -65,7 +65,7 @@ kotatsu image delete --image ARN          # 全バージョンを削除(不可�
 kotatsu tag list|set|unset --resource ARN [--tag K=V …] [--key K …]
 kotatsu dev  --app-url URL [--app-port P] [--listen ADDR]
 kotatsu cost --baseline-gb 2 --baseline-seconds N …   # オフライン見積り
-kotatsu serve -- <kotatsud への引数>                    # exec 委譲
+kotatsu serve -- <kotatsud への引数>                    # PATH 上の kotatsud へ exec 委譲
 ```
 
 グローバル `--region`(または `AWS_REGION`)でリージョンを固定できます。
