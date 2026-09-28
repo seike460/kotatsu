@@ -377,7 +377,7 @@ struct DevCmd {
 
 #[derive(Args)]
 struct CostArgs {
-    /// Baseline memory in GB (tiered: 1,2,4 → 1,2,4 vCPU).
+    /// Baseline memory tier in GB: 1, 2, 4 or 8 (vCPU = GB / 2).
     #[arg(long, default_value = "2")]
     baseline_gb: u32,
     /// Non-peak RUNNING seconds in the period.

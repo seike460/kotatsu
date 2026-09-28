@@ -129,6 +129,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Ctrl-C. Before, SIGTERM ended it at once without the hook.
 - `kotatsu dev` warns when the app's `/terminate` hook fails or does
   not finish within 10 s at shutdown. Before, the result was discarded.
+- Docs: the `kotatsu cost --baseline-gb` help lists the 8 GB tier and
+  gives one vCPU per 2 GB, as the estimate computes. It said 1/2/4 GB
+  with one vCPU per GB.
 - When `kotatsu serve` cannot find `kotatsud`, it points to the GitHub
   Releases tarball and `cargo install --git`. Before, it suggested
   `cargo install --path crates/kotatsud`, which works only inside a
