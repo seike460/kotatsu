@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discarding the error; its docs now state that it is best effort.
 - Docs: `Binding::sentinel` is no longer hidden on docs.rs, and states
   that a custom `StateStore` must persist it and compare it in `claim`.
+- `kotatsud --mock` keeps tenant bindings in memory unless `--state-db`
+  is given. Before, it opened the default `bindings.db`, and when a
+  real deployment on the same host used that file too, the first
+  maintenance tick released all of its bindings: the mock control
+  plane reports real MicroVMs as gone. The real VMs then ran untracked
+  and kept billing.
 - kotatsud forwards the request `Content-Length` when the client framed
   the body by length. Before, every upload reached the VM chunked and
   the body of a GET request was dropped.

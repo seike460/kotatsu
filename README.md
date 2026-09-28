@@ -87,7 +87,7 @@ kotatsud --listen 0.0.0.0:9000 \
 - 認証は `Authorization: Bearer` またはブラウザ WS 用 `?key=`(upstream には流れません)。`--api-key` は全 tenant に届く管理者キー、`--tenant-key TENANT=KEY` はその tenant のみに有効なスコープ付きキーです(他 tenant は 403)
 - `GET /healthz` / `GET /metrics`(無認証 — プライベート bind または前面で保護してください)
 - 中断しても SQLite に binding が残り、再起動後も同じ tenant → VM に戻ります
-- `--mock --mock-endpoint URL` で実 AWS なしの開発ができます
+- `--mock --mock-endpoint URL` で実 AWS なしの開発ができます。`--mock` では、`--state-db` を指定しない限り binding をメモリに置きます(本番と同じ既定の SQLite ファイルは使いません)
 - TOML 設定ファイル(`--config`)対応、未知フィールドは拒否。キーの一覧と例は [crates/kotatsud/README.md](crates/kotatsud/README.md#config-file) にあります
 - `--warm-schedule HH:MM-HH:MM=N`(UTC・繰り返し可・`24:00` 終端可・`22:00-06:00` で日跨ぎ)で時間帯別の warm サイズ。縮退時は超過 warm VM を terminate します
 

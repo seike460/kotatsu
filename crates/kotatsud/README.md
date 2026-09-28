@@ -46,7 +46,7 @@ while the matching flags take whole seconds.
 | `maintenance_interval` | `--maintenance-secs` | duration | `60s` |
 | `forwarded_proto` | `--forwarded-proto` | string | `"http"` |
 | `reap_lost_vms` | `--reap-lost-vms` | bool | `false` |
-| `state_db` | `--state-db` | path | `$XDG_DATA_HOME/kotatsu/bindings.db` (else `~/.local/share/…`) |
+| `state_db` | `--state-db` | path | `$XDG_DATA_HOME/kotatsu/bindings.db` (else `~/.local/share/…`); in memory with `--mock` |
 | `api_keys` | `--api-key` | array of keys | none |
 | `tenant_keys` | `--tenant-key` | array of `"TENANT=KEY"` | none |
 | `allow_unauthenticated` | `--allow-unauthenticated` | bool | `false` |

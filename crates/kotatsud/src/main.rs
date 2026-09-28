@@ -104,8 +104,9 @@ struct Cli {
     reap_lost_vms: Option<bool>,
 
     /// SQLite file for tenant bindings. Default:
-    /// `$XDG_DATA_HOME/kotatsu/bindings.db` (or `~/.local/share/…`).
-    /// In-memory state orphans running VMs on restart (bills to 8h).
+    /// `$XDG_DATA_HOME/kotatsu/bindings.db` (or `~/.local/share/…`);
+    /// with `--mock`, in memory. In-memory state orphans running VMs on
+    /// restart (bills to 8h).
     #[arg(long, env = "KOTATSU_STATE_DB")]
     state_db: Option<PathBuf>,
 
@@ -231,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // -- state store ----------------------------------------------------
-    let store: Arc<dyn StateStore> = match cfg.state_db.clone().or_else(default_state_db) {
+    let store: Arc<dyn StateStore> = match cfg.state_db_path() {
         Some(path) => {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -244,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(path = %path.display(), "persistent bindings (SQLite)");
             Arc::new(kotatsu::SqliteStore::open(&path).await?)
         }
+        None if cfg.mock => Arc::new(MemoryStore::new()),
         None => {
             tracing::warn!("in-memory bindings: a restart orphans running VMs — set --state-db");
             Arc::new(MemoryStore::new())
@@ -528,6 +530,18 @@ impl Resolved {
         })
     }
 
+    /// The SQLite file for bindings, `None` for in-memory state. Mock
+    /// mode never falls back to the default file: the mock control
+    /// plane reports every real MicroVM as gone, so its maintenance
+    /// would release the bindings of a real deployment sharing it.
+    fn state_db_path(&self) -> Option<PathBuf> {
+        match &self.state_db {
+            Some(path) => Some(path.clone()),
+            None if self.mock => None,
+            None => default_state_db(),
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if self.image.is_none() && !self.mock {
             anyhow::bail!("--image (or KOTATSU_IMAGE) is required unless --mock is set");
@@ -658,6 +672,25 @@ mod tests {
             !Resolved::resolve(&cli, &FileConfig::default())
                 .unwrap()
                 .reap_lost_vms
+        );
+    }
+
+    #[test]
+    fn mock_mode_never_defaults_to_the_bindings_file() {
+        // The mock control plane reports real VMs as gone, so sharing
+        // the default file would drop a real deployment's bindings.
+        let state_db = |args: &[&str]| {
+            let cli = Cli::try_parse_from(args).unwrap();
+            Resolved::resolve(&cli, &FileConfig::default())
+                .unwrap()
+                .state_db_path()
+        };
+        assert_eq!(state_db(&["kotatsud", "--mock"]), None);
+        assert_eq!(state_db(&["kotatsud"]), default_state_db());
+        // An explicit path still wins in mock mode.
+        assert_eq!(
+            state_db(&["kotatsud", "--mock", "--state-db", "mock.db"]),
+            Some(PathBuf::from("mock.db"))
         );
     }
 
