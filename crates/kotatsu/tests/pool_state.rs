@@ -462,6 +462,36 @@ async fn release_keeps_binding_when_terminate_fails() {
 }
 
 #[tokio::test]
+async fn drain_release_failure_is_best_effort() {
+    // The VM is terminated but its binding release fails: drain still
+    // returns Ok, and the binding left pointing at the dead VM is
+    // dropped by the next maintain.
+    let cp = Arc::new(MockControlPlane::new());
+    let store = Arc::new(FlakyStore::new());
+    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    cfg.warm_size = 0;
+    cfg.max_vms = 10;
+    let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
+    let sb = pool.acquire(&tenant("u1")).await.unwrap();
+    let id = sb.vm().id().clone();
+    drop(sb);
+
+    store
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    pool.drain().await.unwrap();
+    assert_eq!(cp.get(&id).await.unwrap().state, State::Terminated);
+    assert!(store.get(&tenant("u1")).await.unwrap().is_some());
+
+    store
+        .fail_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let report = pool.maintain().await.unwrap();
+    assert_eq!(report.bindings_dropped, 1);
+    assert!(store.get(&tenant("u1")).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn drain_keeps_failed_terminates_tracked() {
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {

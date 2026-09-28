@@ -1421,6 +1421,10 @@ impl SandboxPool {
     /// so individual buckets may straddle a handoff — but the dedup
     /// rules count every cross-registry appearance once, so the
     /// returned counters never name the same physical VM twice.
+    ///
+    /// Also refreshes the pool gauges. If the store cannot be listed,
+    /// `assigned` and `lost` read 0, the failure is logged, and the
+    /// gauges keep their last values instead of dropping to 0.
     pub async fn stats(&self) -> PoolStats {
         let listed = self.store.list().await;
         let (warm, inflight, assigned, lost) = {
@@ -1436,19 +1440,28 @@ impl SandboxPool {
             lost,
             max_vms: self.cfg.max_vms,
         };
-        crate::metrics::set_pool_stats(&stats);
+        match &listed {
+            Ok(_) => crate::metrics::set_pool_stats(&stats),
+            Err(e) => {
+                tracing::warn!(error = %e, "pool stats: store list failed; gauges keep their last values");
+            }
+        }
         stats
     }
 
-    /// Terminates every pool-managed VM and clears all bindings.
+    /// Terminates every pool-managed VM and releases its binding.
     ///
     /// For embedders performing a full teardown — e.g. a dev-mode
     /// process exiting or test cleanup. `kotatsud` deliberately does
     /// *not* call this on shutdown: bindings persist in the state store
-    /// and the VMs keep running for the next start. A failed
-    /// `terminate` leaves its VM tracked — warm VMs return to `warm`,
-    /// bindings stay bound — so a later `drain`/`maintain` can retry
-    /// rather than leaking a live VM nobody reaps.
+    /// and the VMs keep running for the next start.
+    ///
+    /// Best effort: only a failed `store.list` returns `Err`. A failed
+    /// `terminate` is logged and leaves its VM tracked — warm VMs
+    /// return to `warm`, bindings stay bound — so a later
+    /// `drain`/`maintain` can retry rather than leaking a live VM
+    /// nobody reaps. A failed binding release after the VM is gone is
+    /// logged too; the next `acquire` or `maintain` drops that binding.
     ///
     /// Not atomic: an `acquire` racing `drain` may land a new VM after
     /// the sweep, and a concurrent `maintain` sweep can restore VMs it
@@ -1487,7 +1500,9 @@ impl SandboxPool {
             let res = self.cp.terminate(&b.microvm_id).await;
             match res {
                 Ok(()) | Err(Error::NotFound { .. }) | Err(Error::Terminated(_)) => {
-                    let _ = self.store.release(&b.tenant, &b.microvm_id).await;
+                    if let Err(e) = self.store.release(&b.tenant, &b.microvm_id).await {
+                        tracing::warn!(microvm = %b.microvm_id, error = %e, "drain: binding release failed");
+                    }
                     self.tokens.invalidate(&b.microvm_id);
                 }
                 Err(e) => {

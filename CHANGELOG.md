@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed (e.g. `AccessDeniedException`).
 - Docs: `PoolReport::reaped` and `kotatsu_pool_reaped_total` also count
   sentinel-marked and lost VMs, not only `max_age` expiries.
+- `SandboxPool::stats` no longer sets the `kotatsu_pool_assigned` gauge
+  to 0 when the state store cannot be listed. It logs the failure and
+  leaves the pool gauges at their last values.
+- `SandboxPool::drain` logs a failed binding release instead of
+  discarding the error; its docs now state that it is best effort.
 
 ### Changed
 
