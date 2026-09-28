@@ -158,6 +158,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uuid`. A crate that relied on kotatsu for them, for example to call
   `aws_config::from_env()` without a deprecation warning or to
   serialize a `Uuid`, must enable them in its own `Cargo.toml`.
+- The `kotatsu` crate moves to tokio-tungstenite 0.29 (from 0.26), the
+  version axum 0.8 uses, so one WebSocket stack is built instead of two.
+  `WsStream`, `ws_tls_connector()` and the `From` conversion of
+  tungstenite's `Error` now name 0.29 types.
+- The `sqlite` feature moves to tokio-rusqlite 0.8 (rusqlite 0.40,
+  `libsqlite3-sys` 0.38). Only one `libsqlite3-sys` can link into a
+  build, so an application that also uses `rusqlite` needs 0.40.
 
 ## [0.1.0] - 2026-09-28
 
