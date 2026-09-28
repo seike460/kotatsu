@@ -264,9 +264,18 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
     if app_url.set_scheme(scheme).is_err() {
         return err(StatusCode::BAD_REQUEST, "app url cannot become ws");
     }
+    let tls = match kotatsu::ws_tls_connector() {
+        Ok(c) => c,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("app ws tls: {e}"),
+            );
+        }
+    };
     let app_stream = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio_tungstenite::connect_async(app_url.as_str()),
+        tokio_tungstenite::connect_async_tls_with_config(app_url.as_str(), None, false, Some(tls)),
     )
     .await
     {

@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fetching internal URLs (SSRF) with `X-aws-proxy-auth` attached — and a
   redirect's own `Set-Cookie` never reached the browser.
 
+### Fixed
+
+- `wss://` handshakes (`WsRequest::connect`, kotatsud WebSocket proxying
+  to real MicroVM endpoints, `kotatsu dev` with an `https` `--app-url`)
+  no longer panic with "Could not automatically determine the
+  process-level CryptoProvider". They use the process-default rustls
+  provider when one is installed, else `ring`.
+
 ## [0.1.0] - 2026-09-28
 
 ### Added

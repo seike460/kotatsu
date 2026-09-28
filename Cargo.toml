@@ -30,6 +30,10 @@ parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
 rust_decimal = "1"
 rust_decimal_macros = "1"
+# The AWS SDK enables rustls' `aws-lc-rs` provider and reqwest enables
+# `ring`, so rustls cannot pick a process default on its own; wss
+# handshakes pass an explicit provider (see `kotatsu::ws_tls_connector`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -44,6 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

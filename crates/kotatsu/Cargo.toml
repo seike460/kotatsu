@@ -25,6 +25,7 @@ parking_lot.workspace = true
 reqwest.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
+rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -33,6 +34,7 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

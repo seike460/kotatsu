@@ -273,6 +273,26 @@ async fn endpoint_does_not_follow_upstream_redirects() {
 }
 
 #[tokio::test]
+async fn wss_connect_reaches_the_tls_handshake() {
+    // Both rustls providers are compiled into this crate's dependency
+    // graph, so a handshake that leaves the provider choice to rustls
+    // panics instead of returning an error.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            drop(sock);
+        }
+    });
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("https://{addr}")));
+    let ep = running_endpoint(cp).await;
+    let ws = ep.websocket("/ws", None).await.unwrap();
+    assert_eq!(ws.url().scheme(), "wss");
+    let err = ws.connect().await.unwrap_err();
+    assert!(matches!(err, Error::Ws(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn wait_for_state_terminated_is_reachable() {
     let cp = MockControlPlane::with_behavior(MockBehavior {
         terminate_time: Duration::from_millis(60),

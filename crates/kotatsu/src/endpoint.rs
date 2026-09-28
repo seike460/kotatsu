@@ -287,7 +287,13 @@ impl WsRequest {
             http::HeaderValue::from_str(&self.protocols.join(", "))
                 .map_err(|e| Error::invalid(format!("bad subprotocol header: {e}")))?,
         );
-        let (stream, _resp) = tokio_tungstenite::connect_async(req).await?;
+        let (stream, _resp) = tokio_tungstenite::connect_async_tls_with_config(
+            req,
+            None,
+            false,
+            Some(ws_tls_connector()?),
+        )
+        .await?;
         Ok(stream)
     }
 }
@@ -299,6 +305,28 @@ impl std::fmt::Debug for WsRequest {
             .field("protocols", &"<redacted; see subprotocols()>")
             .finish()
     }
+}
+
+/// TLS connector for `wss://` handshakes.
+///
+/// This crate's dependency graph enables both of rustls' built-in
+/// providers (`aws-lc-rs` through the AWS SDK, `ring` through reqwest),
+/// so rustls cannot choose a process default and a handshake that
+/// leaves the choice to it panics. Uses the process default when the
+/// application installed one, else `ring`, with the webpki roots.
+#[doc(hidden)]
+pub fn ws_tls_connector() -> Result<tokio_tungstenite::Connector> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Ws(Box::new(e)))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
 }
 
 /// Process-wide default HTTP client, built once on first use.
