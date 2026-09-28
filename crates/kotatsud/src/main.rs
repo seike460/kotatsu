@@ -617,6 +617,17 @@ impl Resolved {
 mod tests {
     use super::*;
 
+    /// Parses `args` alone: `KOTATSU_*` and `AWS_REGION` in the
+    /// environment running the tests must not change the result.
+    fn parse_cli(args: &[&str]) -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = Cli::command()
+            .mut_args(|a| a.env(None::<&'static str>))
+            .try_get_matches_from(args)
+            .unwrap();
+        Cli::from_arg_matches(&matches).unwrap()
+    }
+
     #[test]
     fn warm_window_parses_hhmm_range() {
         let w = parse_warm_window("09:00-18:00=8").unwrap();
@@ -676,13 +687,12 @@ mod tests {
 
     #[test]
     fn reap_lost_vms_tri_state_resolution() {
-        use clap::Parser;
         // Bare flag → Some(true); explicit false is expressible; unset → None.
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms"]);
         assert_eq!(cli.reap_lost_vms, Some(true));
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms=false"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms=false"]);
         assert_eq!(cli.reap_lost_vms, Some(false));
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert_eq!(cli.reap_lost_vms, None);
 
         // CLI > file: an explicit false retracts a config-file true —
@@ -691,12 +701,12 @@ mod tests {
             reap_lost_vms: Some(true),
             ..Default::default()
         };
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms=false"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms=false"]);
         assert!(!Resolved::resolve(&cli, &file_true).unwrap().reap_lost_vms);
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert!(Resolved::resolve(&cli, &file_true).unwrap().reap_lost_vms);
         // Default when nothing sets it stays off.
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert!(
             !Resolved::resolve(&cli, &FileConfig::default())
                 .unwrap()
@@ -709,7 +719,7 @@ mod tests {
         // The mock control plane reports real VMs as gone, so sharing
         // the default file would drop a real deployment's bindings.
         let state_db = |args: &[&str]| {
-            let cli = Cli::try_parse_from(args).unwrap();
+            let cli = parse_cli(args);
             Resolved::resolve(&cli, &FileConfig::default())
                 .unwrap()
                 .state_db_path()
@@ -733,7 +743,7 @@ mod tests {
             .and_then(|rest| rest.split("```").next())
             .expect("README has a toml block");
         let file = parse_config(toml).unwrap();
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         let cfg = Resolved::resolve(&cli, &file).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.idle_suspend, Some(Duration::from_secs(300)));
@@ -765,7 +775,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         let cfg = Resolved::resolve(&cli, &file).unwrap();
         assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
         assert_eq!(cfg.maintenance_interval, Duration::from_secs(30));
@@ -776,8 +786,7 @@ mod tests {
 
         // A flag wins over the file, and `--api-key` replaces only the
         // `api_keys` list.
-        let cli = Cli::try_parse_from(["kotatsud", "--api-key", "cli", "--maintenance-secs", "5"])
-            .unwrap();
+        let cli = parse_cli(&["kotatsud", "--api-key", "cli", "--maintenance-secs", "5"]);
         let cfg = Resolved::resolve(&cli, &file).unwrap();
         assert_eq!(cfg.api_keys, ["cli"]);
         assert_eq!(cfg.tenant_keys.len(), 1);
@@ -790,7 +799,7 @@ mod tests {
         assert!(err.contains("unknown field `warm_sise`"), "{err}");
         // Durations are strings; the flags take the whole seconds.
         assert!(parse_config("max_age = 3600").is_err());
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         for bad in [
             r#"warm_schedule = ["9-18=2"]"#,
             r#"tenant_keys = ["bad tenant=s3cret"]"#,
@@ -804,8 +813,7 @@ mod tests {
     #[test]
     fn validate_rejects_each_invalid_setting() {
         let valid = || {
-            let cli =
-                Cli::try_parse_from(["kotatsud", "--image", "img", "--api-key", "k"]).unwrap();
+            let cli = parse_cli(&["kotatsud", "--image", "img", "--api-key", "k"]);
             Resolved::resolve(&cli, &FileConfig::default()).unwrap()
         };
         assert!(valid().validate().is_ok());
