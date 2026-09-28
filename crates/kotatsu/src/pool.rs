@@ -81,6 +81,11 @@ pub struct PoolConfig {
     /// and terminated. With it off (the safe default), recovery still
     /// covers every VM that got a durable sentinel marker; only the
     /// never-pinned gap needs the reconcile.
+    ///
+    /// Requires `run_request.image_identifier` to be the image ARN, not
+    /// an image ID: `list-microvms` reports each VM's image as an ARN
+    /// and the reconcile compares it verbatim, so an ID would match
+    /// nothing. [`SandboxPool::new`] rejects a non-ARN identifier.
     pub reap_lost_vms: bool,
 }
 
@@ -105,6 +110,11 @@ impl PoolConfig {
 
     fn validate(&self) -> Result<()> {
         self.run_request.validate()?;
+        if self.reap_lost_vms && !self.run_request.image_identifier.starts_with("arn:") {
+            return Err(Error::invalid(
+                "reap_lost_vms requires run_request.image_identifier to be the image ARN",
+            ));
+        }
         if self.warm_size > self.max_vms {
             return Err(Error::invalid("warm_size must not exceed max_vms"));
         }

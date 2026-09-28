@@ -9,6 +9,10 @@ use kotatsu::{
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Pool image for tests that enable the lost-VM reconcile, which
+/// requires the image ARN (`PoolConfig::reap_lost_vms`).
+const IMG_ARN: &str = "arn:aws:lambda:us-east-1:123456789012:microvm-image:img";
+
 fn tenant(s: &str) -> TenantKey {
     TenantKey::new(s).unwrap()
 }
@@ -1490,7 +1494,7 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
         store
             .get_ok_budget
             .store(1, std::sync::atomic::Ordering::SeqCst);
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
@@ -1521,7 +1525,7 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
         );
         assert!(cp.get(&vm_id).await.unwrap().is_live());
 
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         cfg.reap_lost_vms = true; // the reconcile this test exercises
@@ -1842,6 +1846,21 @@ async fn invalid_pool_config_rejected() {
     assert!(SandboxPool::new(cp, Arc::new(MemoryStore::new()), cfg).is_err());
 }
 
+#[test]
+fn reap_lost_vms_requires_image_arn() {
+    // list-microvms reports image ARNs: with an image ID the reconcile
+    // would silently match nothing, so the pool refuses to start.
+    let cp: Arc<dyn ControlPlane> = Arc::new(MockControlPlane::new());
+    let pool = |image: &str, reap: bool| {
+        let mut cfg = PoolConfig::new(RunRequest::new(image));
+        cfg.reap_lost_vms = reap;
+        SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), cfg)
+    };
+    assert!(matches!(pool("img", true), Err(Error::InvalidInput(_))));
+    assert!(pool(IMG_ARN, true).is_ok());
+    assert!(pool("img", false).is_ok());
+}
+
 #[tokio::test]
 async fn reap_lost_vms_disabled_keeps_foreign_vm() {
     // `PoolConfig::new` must default `reap_lost_vms` off: an
@@ -1877,7 +1896,7 @@ async fn untracked_foreign_image_vm_survives_reconcile() {
     // whose image is NOT this pool's is never a lost fleet member.
     let cp = Arc::new(FlakyControlPlane::new());
     let pool = SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), {
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         cfg.reap_lost_vms = true;
@@ -1909,7 +1928,7 @@ async fn wait_fail_cleanup_vm_survives_maintain_ticks() {
         },
     ));
     let store = Arc::new(FlakyStore::new());
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON to prove pending protects
@@ -2562,14 +2581,14 @@ async fn reconcile_claim_on_normal_row_skips_vm() {
     let store = Arc::new(FlakyStore::wrapping(Arc::new(
         kotatsu::SqliteStore::open(&path).await.unwrap(),
     )));
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON — it must still yield to bindings
     let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
 
     // An untracked same-image VM — a lost-fleet suspect.
-    let foreign = cp.run(&RunRequest::new("img")).await.unwrap();
+    let foreign = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
     pool.maintain().await.unwrap(); // first sighting
 
     // Second tick: the pin parks at the gate; the row lands mid-flight.
@@ -3053,7 +3072,7 @@ async fn legacy_prefixed_tenant_is_not_a_sentinel() {
     let store = Arc::new(kotatsu::SqliteStore::open(&path).await.unwrap());
     // A live VM under the pool's image first — the row must be an
     // exact self-reference to it.
-    let vm = cp.run(&RunRequest::new("img")).await.unwrap();
+    let vm = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
 
     // Write the row raw (TenantKey::new rejects the prefix) with no
     // `kind` value — the column defaults to a normal binding.
@@ -3082,7 +3101,7 @@ async fn legacy_prefixed_tenant_is_not_a_sentinel() {
 
     // The pool sits on the *same* sqlite store holding the legacy
     // row — a MemoryStore pool would see an untracked VM instead.
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON: the strongest adversary

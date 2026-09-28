@@ -95,6 +95,7 @@ struct Cli {
     /// nowhere — the restart-recovery reconcile. Only safe when the
     /// image is dedicated to this pool: an externally-launched VM of
     /// the same image/version is treated as lost and terminated.
+    /// Requires `--image` to be the image ARN, not an image ID.
     /// `--reap-lost-vms=false` (or `KOTATSU_REAP_LOST_VMS=false`)
     /// explicitly disables it, overriding a config-file `true`.
     #[arg(long, env = "KOTATSU_REAP_LOST_VMS", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
