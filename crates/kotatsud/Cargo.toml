@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords = ["aws", "lambda", "microvm", "gateway", "proxy"]
 categories = ["network-programming", "web-programming::http-server"]
 
