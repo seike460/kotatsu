@@ -130,8 +130,11 @@ struct Cli {
     tenant_keys: Vec<String>,
 
     /// Allow unauthenticated clients (local development only).
-    #[arg(long, env = "KOTATSU_ALLOW_UNAUTHENTICATED")]
-    allow_unauthenticated: bool,
+    /// `--allow-unauthenticated=false` (or
+    /// `KOTATSU_ALLOW_UNAUTHENTICATED=false`) overrides a config-file
+    /// `true`.
+    #[arg(long, env = "KOTATSU_ALLOW_UNAUTHENTICATED", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    allow_unauthenticated: Option<bool>,
 
     /// Use the mock control plane — no AWS calls, for local testing.
     #[arg(long, env = "KOTATSU_MOCK")]
@@ -554,7 +557,9 @@ impl Resolved {
                     .collect::<Result<_, _>>()
                     .map_err(anyhow::Error::msg)?
             },
-            allow_unauthenticated: cli.allow_unauthenticated || file.allow_unauthenticated,
+            allow_unauthenticated: cli
+                .allow_unauthenticated
+                .unwrap_or(file.allow_unauthenticated),
             mock: cli.mock,
         })
     }
@@ -712,6 +717,23 @@ mod tests {
                 .unwrap()
                 .reap_lost_vms
         );
+    }
+
+    #[test]
+    fn allow_unauthenticated_flag_overrides_the_file() {
+        let allow = |args: &[&str], file: bool| {
+            let file = FileConfig {
+                allow_unauthenticated: file,
+                ..Default::default()
+            };
+            Resolved::resolve(&parse_cli(args), &file)
+                .unwrap()
+                .allow_unauthenticated
+        };
+        assert!(!allow(&["kotatsud", "--allow-unauthenticated=false"], true));
+        assert!(allow(&["kotatsud"], true));
+        assert!(allow(&["kotatsud", "--allow-unauthenticated"], false));
+        assert!(!allow(&["kotatsud"], false));
     }
 
     #[test]

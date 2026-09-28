@@ -85,6 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every `maintenance_interval`. Before, it waited a full interval
   first, so kotatsud served its first 60 s with an empty warm pool
   (every acquire was a cold start) and restart recovery waited as long.
+- `kotatsud --allow-unauthenticated=false` (or
+  `KOTATSU_ALLOW_UNAUTHENTICATED=false`) overrides
+  `allow_unauthenticated = true` in the config file, as other flags do.
+  Before, the flag and the file were OR-ed, so the file's `true` could
+  not be turned off.
 
 ### Changed
 
