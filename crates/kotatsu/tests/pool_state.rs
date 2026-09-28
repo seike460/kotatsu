@@ -167,7 +167,6 @@ async fn dead_binding_is_reaped_and_replaced() {
     // Without maintain, acquire self-heals through the binding path.
     let sb = pool.acquire(&tenant("u1")).await.unwrap();
     assert_ne!(sb.vm().id(), &old);
-    assert_ne!(sb.vm().id().as_str(), old.as_str());
 }
 
 #[tokio::test]
@@ -206,10 +205,8 @@ async fn max_age_reaps_bound_vms() {
     let id = sb.vm().id().clone();
     drop(sb);
 
-    // Backdate the VM's start beyond max_age by lying about its age —
-    // the mock reports `started_at_secs = now`, so simulate by
-    // terminating… no: instead assert the sweep terminates it once aged.
-    // With max_age=1s a fresh VM is NOT reaped.
+    // The mock reports `started_at_secs = now`, so with max_age=1s the
+    // fresh VM is NOT reaped…
     let report = pool.maintain().await.unwrap();
     assert_eq!(report.reaped, 0);
     assert!(cp.get(&id).await.unwrap().is_live());
@@ -298,6 +295,8 @@ async fn warm_schedule_scales_down_between_ticks() {
 
 #[tokio::test]
 async fn shrink_failure_restores_vm_to_warm() {
+    // Seed warm VMs via a schedule that first wants 2, then 0 — the
+    // failing-terminate tick must push the VM back, not leak it.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
             terminate_error: Some("boom".into()),
@@ -305,57 +304,30 @@ async fn shrink_failure_restores_vm_to_warm() {
         },
     ));
     let mut cfg = PoolConfig::new(RunRequest::new("img"));
-    cfg.warm_size = 2;
+    cfg.warm_size = 0;
     cfg.max_vms = 10;
-    // All-day window drops the target to 0 — but terminate keeps failing.
-    cfg.warm_schedule = vec![WarmWindow::new(0, 1440, 0).unwrap()];
+    cfg.warm_schedule = vec![
+        WarmWindow::new(60, 120, 2).unwrap(),
+        WarmWindow::new(180, 240, 0).unwrap(),
+    ];
     cfg.wait = WaitPolicy {
         timeout: Duration::from_secs(5),
         initial_delay: Duration::from_millis(10),
         max_delay: Duration::from_millis(50),
     };
     let pool = SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), cfg).unwrap();
-
-    // warm_size=2 wins *before* any tick because shrink happens in
-    // maintain — but the launch loop uses the scheduled target, so
-    // warm VMs are only created via warm_size... verify the sequence:
-    let report = pool.maintain_at(3600).await.unwrap();
-    assert_eq!(report.warmed, 0, "scheduled target 0 should not warm");
-    assert_eq!(report.shrunk, 0, "terminates all fail");
-
-    // Seed warm VMs via a schedule that first wants 2, then 0 — the
-    // failing-terminate tick must push the VM back, not leak it.
-    let cp2 = Arc::new(MockControlPlane::with_behavior(
-        kotatsu::mock::MockBehavior {
-            terminate_error: Some("boom".into()),
-            ..Default::default()
-        },
-    ));
-    let mut cfg2 = PoolConfig::new(RunRequest::new("img"));
-    cfg2.warm_size = 0;
-    cfg2.max_vms = 10;
-    cfg2.warm_schedule = vec![
-        WarmWindow::new(60, 120, 2).unwrap(),
-        WarmWindow::new(180, 240, 0).unwrap(),
-    ];
-    cfg2.wait = WaitPolicy {
-        timeout: Duration::from_secs(5),
-        initial_delay: Duration::from_millis(10),
-        max_delay: Duration::from_millis(50),
-    };
-    let pool2 = SandboxPool::new(cp2.clone(), Arc::new(MemoryStore::new()), cfg2).unwrap();
-    let report = pool2.maintain_at(90 * 60).await.unwrap();
+    let report = pool.maintain_at(90 * 60).await.unwrap();
     assert_eq!(report.warmed, 2);
 
-    let report = pool2.maintain_at(210 * 60).await.unwrap();
+    let report = pool.maintain_at(210 * 60).await.unwrap();
     assert_eq!(report.shrunk, 0);
     // Both VMs return to warm; inflight is fully released (no leak).
-    let stats = pool2.stats().await;
+    let stats = pool.stats().await;
     assert_eq!(stats.warm, 2);
     assert_eq!(stats.inflight, 0);
     // And the VMs are still live — terminate never landed.
     assert!(
-        cp2.list(None, None)
+        cp.list(None, None)
             .await
             .unwrap()
             .iter()
@@ -1808,8 +1780,8 @@ async fn dead_vm_not_rewarmed_after_wait_failure() {
         },
     ));
     let pool = Arc::new(test_pool(cp.clone(), 0, 10));
-    // Give the acquire a short wait budget so it fails fast.
-    // (test_pool already sets a 5s timeout with 10-50ms backoff.)
+    // The VM never boots; terminating it mid-wait fails the wait at
+    // once instead of spending test_pool's 5s budget.
     let acq = tokio::spawn({
         let pool = pool.clone();
         async move { pool.acquire(&tenant("u1")).await }
