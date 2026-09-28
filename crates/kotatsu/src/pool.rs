@@ -1400,8 +1400,10 @@ impl SandboxPool {
         Ok(report)
     }
 
-    /// Spawns a background task calling [`SandboxPool::maintain`] every
-    /// `maintenance_interval`. Abort the returned handle to stop it —
+    /// Spawns a background task calling [`SandboxPool::maintain`] at
+    /// once, then every `maintenance_interval`, so the warm set and
+    /// restart recovery start without waiting a full interval. Abort
+    /// the returned handle to stop it —
     /// aborting is safe mid-tick: state locks are never held across
     /// `.await`, swept warm VMs are restored by an internal guard, the
     /// `maintaining` flag resets via `Drop`, and an in-flight `run` is
@@ -1410,10 +1412,10 @@ impl SandboxPool {
         let pool = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(pool.cfg.maintenance_interval).await;
                 if let Err(e) = pool.maintain().await {
                     tracing::warn!(error = %e, "pool maintenance tick failed");
                 }
+                tokio::time::sleep(pool.cfg.maintenance_interval).await;
             }
         })
     }

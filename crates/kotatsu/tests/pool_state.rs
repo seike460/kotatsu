@@ -141,6 +141,30 @@ async fn maintain_warms_then_acquire_consumes() {
 }
 
 #[tokio::test]
+async fn spawned_maintenance_ticks_before_the_first_interval() {
+    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    cfg.warm_size = 2;
+    cfg.maintenance_interval = Duration::from_secs(3600);
+    let pool = Arc::new(
+        SandboxPool::new(
+            Arc::new(MockControlPlane::new()),
+            Arc::new(MemoryStore::new()),
+            cfg,
+        )
+        .unwrap(),
+    );
+    let task = pool.spawn_maintenance();
+    let warmed = tokio::time::timeout(Duration::from_secs(5), async {
+        while pool.stats().await.warm < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    task.abort();
+    assert!(warmed.is_ok(), "the warm set waited for the first interval");
+}
+
+#[tokio::test]
 async fn suspend_then_reacquire_resumes() {
     let cp = Arc::new(MockControlPlane::new());
     let pool = test_pool(cp.clone(), 0, 10);

@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client `Cookie` header to the tenant's VM on HTTP requests. A front
   proxy's session cookie must use a `Path` outside `/t/`, or the proxy
   must strip it.
+- `SandboxPool::spawn_maintenance` runs its first tick at once, then
+  every `maintenance_interval`. Before, it waited a full interval
+  first, so kotatsud served its first 60 s with an empty warm pool
+  (every acquire was a cold start) and restart recovery waited as long.
 
 ### Changed
 
