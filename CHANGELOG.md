@@ -73,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--config`, since other local users can read command-line arguments.
 - Docs: README states that `__Host-` cookies do not survive the tenant
   path clamp.
+- Docs: the `kotatsud --idle-suspend-secs` help no longer says that 0
+  relies on the image's own idle policy. MicroVM images have no idle
+  policy: with 0 (or unset), VMs run without one and are not
+  auto-suspended.
+- Docs: README's security model states that kotatsud forwards the
+  client `Cookie` header to the tenant's VM on HTTP requests. A front
+  proxy's session cookie must use a `Path` outside `/t/`, or the proxy
+  must strip it.
 
 ### Changed
 

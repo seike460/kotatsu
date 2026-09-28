@@ -66,8 +66,8 @@ struct Cli {
     #[arg(long, env = "KOTATSU_MAX_AGE_SECS")]
     max_age_secs: Option<u64>,
 
-    /// Suspend a VM after this many idle seconds (0 = rely on the
-    /// image's own idle policy).
+    /// Suspend a VM after this many idle seconds (60-28800; 0 = off: VMs
+    /// run without an idle policy and are not auto-suspended).
     #[arg(long, env = "KOTATSU_IDLE_SUSPEND_SECS")]
     idle_suspend_secs: Option<u64>,
 

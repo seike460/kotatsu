@@ -99,6 +99,7 @@ kotatsud --listen 0.0.0.0:9000 \
 - tenant 境界: `--tenant-key` のスコープ付きキーは自 tenant の `/t/*` にしか届きません。上流の `Set-Cookie` は `Path` を `/t/{tenant}` 以下に書き換え `Domain` を除去するので、Cookie が tenant をまたぎません(Path を無視する非ブラウザクライアントには効きません — その場合は tenant ごとの host を使ってください)
 - `__Host-` で始まる Cookie は `Path=/` が必須なので、`Path` を書き換えた後はブラウザが保存しません。tenant のアプリでは `__Host-` 接頭辞を使わないでください(`__Secure-` は使えます)
 - 全 tenant が同じ origin を共有するので、origin 全体に効く上流の応答ヘッダ(`Strict-Transport-Security`・`Alt-Svc`・`Service-Worker-Allowed`・`Clear-Site-Data`・`NEL`・`Report-To`)はクライアントに返しません
+- HTTP のリクエストでは、クライアントの `Cookie` ヘッダがそのまま tenant の VM に届きます。前段(認証プロキシなど)がセッション Cookie を発行するなら、`/t/` 配下に届かない `Path` で発行するか、前段で取り除いてください。`Path=/` のままだと、すべての tenant の VM がその Cookie を受け取ります
 - ブラウザ WS 用 `?key=` は TLS 前段の access log や APM に残り得ます。短命のスコープ付きキーを使うか、前段で query を記録しない設定にしてください
 - `x-forwarded-for` はクライアントの ConnectInfo から、`x-forwarded-proto` は `--forwarded-proto` 設定値からゲートウェイが生成します
 - `AuthToken` は Debug 出力で `<redacted>`、TTL ≤60 分(既定 30 分)・ポートスコープ付きで最小化します
