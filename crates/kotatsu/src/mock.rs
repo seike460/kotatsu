@@ -353,7 +353,7 @@ impl ControlPlane for MockControlPlane {
         Ok(AuthToken {
             value: format!("dev-token-{}", uuid::Uuid::new_v4()),
             issued_at: Instant::now(),
-            ttl: Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl: crate::control_plane::ttl_duration(ttl_minutes),
             scope: scope.to_vec(),
             kind: TokenKind::Port,
         })
@@ -369,7 +369,7 @@ impl ControlPlane for MockControlPlane {
         Ok(AuthToken {
             value: format!("dev-shell-token-{}", uuid::Uuid::new_v4()),
             issued_at: Instant::now(),
-            ttl: Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl: crate::control_plane::ttl_duration(ttl_minutes),
             scope: Vec::new(),
             kind: TokenKind::Shell,
         })

@@ -265,18 +265,12 @@ impl PortSpec {
                 .trim()
                 .parse()
                 .map_err(|_| Error::invalid(format!("bad port range {s:?}")))?;
-            if start == 0 || start > end {
-                return Err(Error::invalid(format!("bad port range {s:?}")));
-            }
-            return Ok(Self::Range { start, end });
+            return Self::range(start, end);
         }
         let port: u16 = s
             .parse()
             .map_err(|_| Error::invalid(format!("bad port {s:?}")))?;
-        if port == 0 {
-            return Err(Error::invalid("port 0 is not valid"));
-        }
-        Ok(Self::Port(port))
+        Self::port(port)
     }
 
     /// Converts to the SDK union type.

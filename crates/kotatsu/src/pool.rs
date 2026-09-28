@@ -394,6 +394,49 @@ fn registry_overlap(g: &PoolInner, normal: &HashSet<&MicrovmId>) -> (usize, usiz
     (warm_extra, inflight_extra)
 }
 
+/// VM ids owned by normal (tenant) bindings — sentinel markers excluded.
+fn normal_bound_ids(bindings: &[Binding]) -> HashSet<&MicrovmId> {
+    bindings
+        .iter()
+        .filter(|b| !b.sentinel)
+        .map(|b| &b.microvm_id)
+        .collect()
+}
+
+/// `(warm, inflight, assigned, lost)` with every physical VM counted
+/// once — the one formula behind both `stats` and `try_reserve`'s
+/// `max_vms` check. `normal` is [`normal_bound_ids`] of `bindings`.
+///
+/// Sentinel markers are not assignments. A sentinel whose VM a live
+/// reaper (`pending`), a `warm` entry, or a normal binding already
+/// holds counts there; only a marker held nowhere else (post-restart,
+/// or a reaper that gave up) counts as `lost`. `registry_overlap`
+/// drops the surplus appearances a VM picks up across the other
+/// registries.
+fn managed_counts(
+    g: &PoolInner,
+    bindings: &[Binding],
+    normal: &HashSet<&MicrovmId>,
+) -> (usize, usize, usize, usize) {
+    let (assigned, lost) = bindings.iter().fold((0, 0), |(a, l), b| {
+        if b.sentinel {
+            let held = g.pending.contains_key(&b.microvm_id)
+                || g.warm.iter().any(|v| v.id == b.microvm_id)
+                || normal.contains(&b.microvm_id);
+            (a, l + usize::from(!held))
+        } else {
+            (a + 1, l)
+        }
+    });
+    let (warm_extra, inflight_extra) = registry_overlap(g, normal);
+    (
+        g.warm.len() - warm_extra,
+        g.inflight - inflight_extra,
+        assigned,
+        lost,
+    )
+}
+
 /// Capacity reservation that also *owns* the in-handoff VM.
 ///
 /// A popped or freshly-launched VM is untracked between materialization
@@ -1008,15 +1051,10 @@ impl SandboxPool {
         // failure while still applying its write. The binding owns it;
         // drop it from `warm` so no second tenant can be handed the
         // same VM.
-        let bound: std::collections::HashSet<&MicrovmId> =
-            bindings.iter().map(|b| &b.microvm_id).collect();
+        let bound: HashSet<&MicrovmId> = bindings.iter().map(|b| &b.microvm_id).collect();
         // Ownership snapshots for marker-vs-VM coexistence checks —
         // shared with the lost-VM reconcile below.
-        let normal_bound: std::collections::HashSet<&MicrovmId> = bindings
-            .iter()
-            .filter(|b| !b.sentinel)
-            .map(|b| &b.microvm_id)
-            .collect();
+        let normal_bound = normal_bound_ids(&bindings);
         let (warm_ids, pending_ids) = {
             let g = self.inner.lock();
             (
@@ -1381,48 +1419,15 @@ impl SandboxPool {
     ///
     /// The store list and the in-memory sets are read a moment apart,
     /// so individual buckets may straddle a handoff — but the dedup
-    /// rules below count every cross-registry appearance once, so the
+    /// rules count every cross-registry appearance once, so the
     /// returned counters never name the same physical VM twice.
     pub async fn stats(&self) -> PoolStats {
-        // Sentinels are not tenant bindings. One whose VM a live
-        // reaper, a `warm` entry, or a normal binding already holds is
-        // carried there; report in `lost` only the markers tracking
-        // the VM nowhere else (post-restart or abandoned). `inflight`
-        // likewise drops the pending slots whose VM already sits in
-        // `warm` — a sibling cleanup parked it — so
-        // `warm + inflight + assigned + lost` counts each VM once.
-        let (warm, inflight, assigned, lost) = match self.store.list().await {
-            Ok(l) => {
-                let normal: HashSet<&MicrovmId> = l
-                    .iter()
-                    .filter(|b| !b.sentinel)
-                    .map(|b| &b.microvm_id)
-                    .collect();
-                let g = self.inner.lock();
-                let (assigned, lost) = l.iter().fold((0, 0), |(a, s), b| {
-                    if b.sentinel {
-                        let held = g.pending.contains_key(&b.microvm_id)
-                            || g.warm.iter().any(|v| v.id == b.microvm_id)
-                            || normal.contains(&b.microvm_id);
-                        (a, s + usize::from(!held))
-                    } else {
-                        (a + 1, s)
-                    }
-                });
-                let (warm_extra, inflight_extra) = registry_overlap(&g, &normal);
-                (
-                    g.warm.len() - warm_extra,
-                    g.inflight - inflight_extra,
-                    assigned,
-                    lost,
-                )
-            }
-            Err(_) => {
-                let g = self.inner.lock();
-                let empty = HashSet::new();
-                let (warm_extra, inflight_extra) = registry_overlap(&g, &empty);
-                (g.warm.len() - warm_extra, g.inflight - inflight_extra, 0, 0)
-            }
+        let listed = self.store.list().await;
+        let (warm, inflight, assigned, lost) = {
+            let bindings = listed.as_deref().unwrap_or_default();
+            let normal = normal_bound_ids(bindings);
+            let g = self.inner.lock();
+            managed_counts(&g, bindings, &normal)
         };
         let stats = PoolStats {
             warm,
@@ -1499,32 +1504,11 @@ impl SandboxPool {
     /// the store between our `list()` and our counter update.
     async fn try_reserve(&self) -> Result<Handoff<'_>> {
         let _cap = self.capacity.lock().await;
-        // Sentinel markers are not assignments. A sentinel whose VM a
-        // live reaper, a `warm` entry, or a normal binding already
-        // holds counts there; one held nowhere (post-restart, or a
-        // reaper that gave up) counts via its marker — either way
-        // exactly once. `registry_overlap` drops the surplus
-        // appearances a VM picks up across the other registries.
         let bindings = self.store.list().await?;
-        let normal: HashSet<&MicrovmId> = bindings
-            .iter()
-            .filter(|b| !b.sentinel)
-            .map(|b| &b.microvm_id)
-            .collect();
+        let normal = normal_bound_ids(&bindings);
         let mut g = self.inner.lock();
-        let (assigned, lost_unheld) = bindings.iter().fold((0, 0), |(a, l), b| {
-            if b.sentinel {
-                let held = g.pending.contains_key(&b.microvm_id)
-                    || g.warm.iter().any(|v| v.id == b.microvm_id)
-                    || normal.contains(&b.microvm_id);
-                (a, l + usize::from(!held))
-            } else {
-                (a + 1, l)
-            }
-        });
-        let (warm_extra, inflight_extra) = registry_overlap(&g, &normal);
-        let managed =
-            g.warm.len() - warm_extra + g.inflight - inflight_extra + assigned + lost_unheld;
+        let (warm, inflight, assigned, lost) = managed_counts(&g, &bindings, &normal);
+        let managed = warm + inflight + assigned + lost;
         if managed >= self.cfg.max_vms {
             return Err(Error::PoolExhausted(managed));
         }
@@ -1679,7 +1663,6 @@ impl SandboxPool {
             let inner = Arc::clone(&self.inner);
             let capacity = Arc::clone(&self.capacity);
             let tenant = tenant.clone();
-            let vm_id = vm_id.clone();
             async move {
                 /// The VM's ownership after the release attempt.
                 enum Ownership {

@@ -90,7 +90,7 @@ impl TokenVending {
         // margin must be compared against the *effective* TTL — a 120min
         // request mints a 60min token.
         let ttl =
-            Duration::from_secs(cfg.ttl_minutes.min(crate::MAX_TOKEN_TTL_MINUTES) as u64 * 60);
+            crate::control_plane::ttl_duration(cfg.ttl_minutes.min(crate::MAX_TOKEN_TTL_MINUTES));
         if cfg.refresh_margin >= ttl {
             return Err(crate::error::Error::invalid(format!(
                 "TokenVendingConfig: refresh_margin {:?} must be < ttl {ttl:?}",
@@ -116,17 +116,9 @@ impl TokenVending {
             ));
         }
         let key = cache_key(id, TokenKind::Port, scope);
-        let cached = self
-            .cache
-            .lock()
-            .get(&key)
-            .filter(|t| !t.nearly_expired(self.cfg.refresh_margin))
-            .cloned();
-        if let Some(t) = cached {
-            crate::metrics::record_token(true);
+        if let Some(t) = self.cached(&key) {
             return Ok(t);
         }
-        crate::metrics::record_token(false);
         let token = self.cp.mint_token(id, scope, self.cfg.ttl_minutes).await?;
         self.cache.lock().insert(key, token.clone());
         Ok(token)
@@ -138,20 +130,25 @@ impl TokenVending {
     /// data-plane tokens.
     pub async fn shell_token(&self, id: &MicrovmId) -> Result<AuthToken> {
         let key = cache_key(id, TokenKind::Shell, &[]);
-        let cached = self
-            .cache
-            .lock()
-            .get(&key)
-            .filter(|t| !t.nearly_expired(self.cfg.refresh_margin))
-            .cloned();
-        if let Some(t) = cached {
-            crate::metrics::record_token(true);
+        if let Some(t) = self.cached(&key) {
             return Ok(t);
         }
-        crate::metrics::record_token(false);
         let token = self.cp.mint_shell_token(id, self.cfg.ttl_minutes).await?;
         self.cache.lock().insert(key, token.clone());
         Ok(token)
+    }
+
+    /// The cached token for `key` unless it is within `refresh_margin`
+    /// of expiry; records the hit or the miss (a miss means a mint).
+    fn cached(&self, key: &CacheKey) -> Option<AuthToken> {
+        let hit = self
+            .cache
+            .lock()
+            .get(key)
+            .filter(|t| !t.nearly_expired(self.cfg.refresh_margin))
+            .cloned();
+        crate::metrics::record_token(hit.is_some());
+        hit
     }
 
     /// Drops every cached token for `id` (all kinds and scopes).

@@ -177,7 +177,6 @@ pub async fn wait_until_running<C: ControlPlane + ?Sized>(
                     match tokio::time::timeout(remaining, cp.resume(id)).await {
                         Err(_) => return Err(wait_timeout(id, &want, policy)),
                         Ok(Ok(())) => {}
-                        Ok(Err(e @ Error::NotFound { .. })) => return Err(e),
                         Ok(Err(e)) if !e.is_transient() => return Err(e),
                         Ok(Err(e)) => {
                             tracing::debug!(
