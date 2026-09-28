@@ -362,13 +362,50 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
-    axum::serve(
+    serve_until(listener, app, shutdown_signal(), SHUTDOWN_GRACE).await?;
+    Ok(())
+}
+
+/// How long open connections get to finish after SIGTERM/SIGINT — less
+/// than the 30 s that Kubernetes and ECS wait before SIGKILL.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+
+/// Serves `app` until `signal`, then stops accepting connections and
+/// gives open ones `grace` to finish before dropping them. A response
+/// streamed from a VM (SSE, a long download) may never end, and axum's
+/// graceful shutdown alone would wait for it forever.
+async fn serve_until(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    signal: impl Future<Output = ()> + Send + 'static,
+    grace: Duration,
+) -> std::io::Result<()> {
+    let (stopping_tx, stopping) = tokio::sync::oneshot::channel();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-    Ok(())
+    .with_graceful_shutdown(async move {
+        signal.await;
+        let _ = stopping_tx.send(());
+    });
+    let expired = async {
+        if stopping.await.is_ok() {
+            tokio::time::sleep(grace).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        res = server.into_future() => res,
+        () = expired => {
+            tracing::warn!(
+                ?grace,
+                "connections still open after the shutdown grace period — closing them"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Builds the gateway's key map: `key → Option<allowed tenants>`
@@ -772,6 +809,39 @@ mod tests {
         // Unset, these two fall back to the values checked above.
         assert_eq!(cfg.suspended_ttl, None);
         assert_eq!(cfg.wait_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_streams_after_the_grace_period() {
+        let app = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(|| async {
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<Vec<u8>, std::io::Error>,
+                >())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_until(
+            listener,
+            app,
+            async {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(100),
+        ));
+        let resp = reqwest::get(format!("http://{addr}/stream")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("shutdown waited for the open stream")
+            .unwrap()
+            .unwrap();
+        drop(resp);
     }
 
     #[test]

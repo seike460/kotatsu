@@ -23,6 +23,11 @@ its default, if any.
 without authentication. The metric names are documented in
 `kotatsu::metrics::names`.
 
+On SIGTERM or SIGINT, kotatsud stops accepting connections and gives
+open ones 20 seconds to finish before it closes them and exits; a
+response streamed from a VM (SSE, a long download) may never end on
+its own. Tenant bindings persist and the VMs keep running.
+
 ## Config file
 
 `--config FILE` (or `KOTATSU_CONFIG`) reads a TOML file, and unknown

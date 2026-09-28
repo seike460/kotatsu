@@ -85,6 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every `maintenance_interval`. Before, it waited a full interval
   first, so kotatsud served its first 60 s with an empty warm pool
   (every acquire was a cold start) and restart recovery waited as long.
+- kotatsud gives open connections 20 s after SIGTERM or SIGINT, then
+  closes them and exits. Before, a response streamed from a VM (SSE, a
+  long download) kept it running until the supervisor's SIGKILL.
 - `kotatsud --allow-unauthenticated=false` (or
   `KOTATSU_ALLOW_UNAUTHENTICATED=false`) overrides
   `allow_unauthenticated = true` in the config file, as other flags do.
