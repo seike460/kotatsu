@@ -435,8 +435,8 @@ async fn sdk_config(region: &Option<String>) -> aws_config::SdkConfig {
     loader.load().await
 }
 
-async fn aws_cp(region: &Option<String>) -> anyhow::Result<AwsControlPlane> {
-    Ok(AwsControlPlane::new(&sdk_config(region).await))
+async fn aws_cp(region: &Option<String>) -> AwsControlPlane {
+    AwsControlPlane::new(&sdk_config(region).await)
 }
 
 fn vm_id(id: &str) -> anyhow::Result<MicrovmId> {
@@ -444,7 +444,7 @@ fn vm_id(id: &str) -> anyhow::Result<MicrovmId> {
 }
 
 async fn vm(c: VmCmd, region: Option<String>) -> anyhow::Result<()> {
-    let cp = aws_cp(&region).await?;
+    let cp = aws_cp(&region).await;
     match c.cmd {
         VmSub::List { image, version } => {
             let vms = cp.list(image.as_deref(), version.as_deref()).await?;
@@ -883,7 +883,7 @@ fn check_ttl(ttl_minutes: i32) -> anyhow::Result<()> {
 }
 
 async fn token(c: TokenCmd, region: Option<String>) -> anyhow::Result<()> {
-    let cp = aws_cp(&region).await?;
+    let cp = aws_cp(&region).await;
     match c.cmd {
         TokenSub::Mint {
             id,
