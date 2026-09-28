@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -468,4 +468,51 @@ async fn terminate_hook_failure_during_boot_settles_failed() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 500);
+}
+
+/// A failed `/suspend` hook leaves the emulator `Running` (409 names the
+/// hook error); a failed auto-resume answers 502, as AWS does, and
+/// leaves it `Suspended`.
+#[tokio::test]
+async fn failed_suspend_or_resume_hook_keeps_state() {
+    let fail_suspend = Arc::new(AtomicBool::new(true));
+    let f = fail_suspend.clone();
+    let app = Router::new()
+        .route(
+            &hook("suspend"),
+            post(move || {
+                let f = f.clone();
+                async move {
+                    if f.load(Ordering::SeqCst) {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        )
+        .route(
+            &hook("resume"),
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+    let (emu, ep) = up_with(app, |_| {}).await;
+    let http = client();
+
+    let r = http
+        .post(format!("{ep}/_kotatsu/suspend"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(
+        r.text().await.unwrap(),
+        "suspend hook returned 500 Internal Server Error"
+    );
+    assert_eq!(emu.state(), DevState::Running);
+
+    fail_suspend.store(false, Ordering::SeqCst);
+    emu.suspend().await.unwrap();
+    let resp = authed(&http, &format!("{ep}/x")).send().await.unwrap();
+    assert_eq!(resp.status(), 502);
+    assert_eq!(emu.state(), DevState::Suspended);
 }

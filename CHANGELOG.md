@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   during boot. The emulator then stayed `PENDING`, answered every
   request 503 and never finished waiting for boot. It now ends
   `FAILED`.
+- `kotatsu dev` answers 502 to a request whose auto-resume fails, as
+  AWS does. It used to answer 503.
 
 ### Changed
 

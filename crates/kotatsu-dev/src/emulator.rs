@@ -27,7 +27,8 @@ pub enum DevState {
     Suspended,
     /// Final state; every request gets 410.
     Terminated,
-    /// A hook call failed or timed out.
+    /// Boot did not finish: a boot hook (`/validate`, `/run`, `/ready`)
+    /// failed or timed out, or a `/terminate` hook failed mid-boot.
     Failed(String),
 }
 

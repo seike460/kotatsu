@@ -143,9 +143,10 @@ async fn gate(s: &Shared) -> Result<(), Box<Response>> {
             StatusCode::SERVICE_UNAVAILABLE,
             "microvm is booting",
         ))),
+        // AWS answers a request whose auto-resume fails with 502.
         DevState::Suspended if s.cfg.auto_resume => s.resume().await.map_err(|e| {
             Box::new(err(
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::BAD_GATEWAY,
                 &format!("auto-resume failed: {e}"),
             ))
         }),
