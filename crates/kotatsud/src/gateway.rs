@@ -210,8 +210,28 @@ fn err_response(e: &Error, tenant: &TenantKey) -> Response {
         ),
         _ => (StatusCode::BAD_GATEWAY, "upstream unavailable"),
     };
-    tracing::warn!(%tenant, status = status.as_u16(), error = %e, "proxy request failed");
+    let error = redact_queries(&e.to_string());
+    tracing::warn!(%tenant, status = status.as_u16(), %error, "proxy request failed");
     json_error(status, msg)
+}
+
+/// Error text for the log with every URL query replaced: the proxied
+/// target carries the client's query verbatim, and reqwest and
+/// tungstenite errors echo the URL they failed on.
+fn redact_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '?' {
+            out.push_str("REDACTED");
+            while chars
+                .next_if(|n| !n.is_whitespace() && !matches!(n, ')' | ']' | '>' | '"' | '\''))
+                .is_some()
+            {}
+        }
+    }
+    out
 }
 
 /// `/t/{tenant}` — proxy to the VM's root path.
@@ -646,5 +666,66 @@ fn to_axum(m: TungMsg) -> AxumMsg {
         // Raw frames are filtered out by the read loop, so this arm is
         // unreachable — kept only to satisfy the exhaustive match.
         TungMsg::Frame(_) => AxumMsg::Binary(Default::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_queries_masks_every_url_query() {
+        assert_eq!(
+            redact_queries(
+                "error sending request for url (http://10.0.0.1:8080/p?token=s3cret&x=1)"
+            ),
+            "error sending request for url (http://10.0.0.1:8080/p?REDACTED)"
+        );
+        assert_eq!(
+            redact_queries("Unable to connect to wss://h/ws?key=abc: refused"),
+            "Unable to connect to wss://h/ws?REDACTED refused"
+        );
+        assert_eq!(redact_queries("no url here"), "no url here");
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_proxy_request_logs_no_client_query() {
+        let logs = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Port 1 refuses the connection: a real reqwest error that
+        // carries the request URL, as a dead VM endpoint does.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/app?token=s3cret")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("s3cret"), "precondition: {err}");
+        let resp = err_response(&Error::Http(err), &TenantKey::new("t1").unwrap());
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(text.contains("proxy request failed"), "{text}");
+        assert!(!text.contains("s3cret"), "{text}");
     }
 }
