@@ -140,6 +140,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo install kotatsu-cli`; the crates are not on crates.io yet. It
   installs both binaries from GitHub and states that `serve` needs
   `kotatsud` on `PATH`.
+- The Linux release binaries run on glibc 2.28 and later (Amazon
+  Linux 2023, Debian 10+, Ubuntu 20.04+, RHEL 8+). The v0.1.0 ones
+  were linked against the build runner's glibc 2.39 and failed to
+  start on an older glibc, such as Amazon Linux 2023's, with
+  `version 'GLIBC_2.39' not found`.
 
 ### Changed
 

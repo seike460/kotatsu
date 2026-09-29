@@ -144,7 +144,7 @@ sandbox.release().await?; // または suspend() — プール方針と tenant �
 ## 6. なぜ Rust か
 
 - 常駐ゲートウェイは「N 並行の WS/SSE を低メモリで捌く」仕事。Rust の実需が素直に効く
-- 単一 static バイナリで Lambda / Fargate / EC2 / **microVM 内** のどこへも置ける
+- 単一バイナリ(Linux 版は glibc 2.28 以上)で Lambda / Fargate / EC2 / **microVM 内** のどこへも置ける
 - `aws-sdk-lambdamicrovms` が GA 済み。生成 SDK への薄い高級ラッパとして
   typestate(「RUNNING でしか connect できない」等を型で閉じる)の旨味が出せる
 - エコシステムに Rust 製の「フリート層」が無い(microvms-agentd は単体層)

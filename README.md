@@ -117,6 +117,9 @@ cargo install --locked --path crates/kotatsu-cli   # `kotatsu` コマンド
 cargo install --locked --path crates/kotatsud      # `kotatsud` ゲートウェイデーモン
 ```
 
+Releases の Linux 版(x86_64 / aarch64)は glibc 2.28 以上で動きます
+(Amazon Linux 2023、Debian 10 以降、Ubuntu 20.04 以降、RHEL 8 以降)。
+
 crates.io 公開後は `cargo install kotatsu-cli` / `cargo install kotatsud` で入り、
 ライブラリとしては `cargo add kotatsu` で組み込めます。
 crates.io への公開は依存順に `kotatsu` → `kotatsu-dev` → `kotatsud` → `kotatsu-cli` の順で行います
