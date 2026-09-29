@@ -200,8 +200,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedicated image, since list APIs carry no owner tag; kotatsud's flag
   also accepts `--reap-lost-vms=false` to retract a config-file `true`).
   `PoolStats` reports `warm`/`assigned`/`inflight`/`lost`.
-  `detached_task_count()`
-  is a `#[doc(hidden)]` diagnostic for observing the reaper JoinSet.
 - `kotatsud` session gateway daemon: tenant routing (`/t/{tenant}[/{*path}]`),
   Bearer API-key auth, HTTP + WebSocket proxying with header stripping,
   per-VM token vending, `/healthz` + `/metrics`, SQLite binding persistence,
@@ -217,3 +215,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (list/set/unset), `dev`, `cost`, `serve`.
 - `Dockerfile` (kotatsud + kotatsu), `LICENSE-MIT`/`LICENSE-APACHE`,
   CI (fmt/clippy/test) and tag-release binary workflow.
+
+[Unreleased]: https://github.com/seike460/kotatsu/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/seike460/kotatsu/releases/tag/v0.1.0
