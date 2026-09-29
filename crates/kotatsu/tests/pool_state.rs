@@ -1904,6 +1904,88 @@ async fn reap_lost_vms_disabled_keeps_foreign_vm() {
     assert_eq!(terminates(), 0, "no terminate may be issued at all");
 }
 
+/// Collects formatted `tracing` output for assertions.
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+#[tokio::test]
+async fn lost_vm_marker_release_failure_is_logged_and_retried() {
+    // The lost VM is terminated but its sentinel marker can't be
+    // released: the failure is logged, and the marker left behind is
+    // cleared by the next maintain once the store recovers.
+    let logs = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let cp = Arc::new(FlakyControlPlane::new());
+    let store = Arc::new(FlakyStore::new());
+    let pool = SandboxPool::new(cp.clone(), store.clone(), {
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
+        cfg.warm_size = 0;
+        cfg.max_vms = 10;
+        cfg.reap_lost_vms = true;
+        cfg
+    })
+    .unwrap();
+    let lost = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
+    pool.maintain().await.unwrap(); // first sighting: suspect only
+
+    store
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = pool.maintain().await.unwrap();
+    assert_eq!(report.reaped, 1);
+    assert_eq!(cp.get(&lost.id).await.unwrap().state, State::Terminated);
+    assert!(
+        logs.text().contains("sentinel marker release failed"),
+        "the failed release must be logged: {}",
+        logs.text()
+    );
+    assert!(
+        store
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.sentinel && b.microvm_id == lost.id),
+        "the marker stays for the retry"
+    );
+
+    store
+        .fail_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    pool.maintain().await.unwrap();
+    assert!(
+        !store.list().await.unwrap().iter().any(|b| b.sentinel),
+        "the next maintain clears the marker of the dead VM"
+    );
+}
+
 #[tokio::test]
 async fn untracked_foreign_image_vm_survives_reconcile() {
     // Even with the reconcile enabled, image scoping holds: a live VM

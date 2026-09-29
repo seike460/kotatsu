@@ -600,6 +600,15 @@ fn bound_to_other(outcome: &Result<ClaimOutcome>, vm_id: &MicrovmId) -> bool {
     matches!(outcome, Ok(ClaimOutcome::HeldByOther(b)) if !b.sentinel && b.microvm_id == *vm_id)
 }
 
+/// Drops a sentinel marker, best effort: a marker left behind only
+/// records a dead or re-owned VM, which `maintain` releases on sight —
+/// but a failing store must still show up in the logs.
+async fn release_marker(store: &dyn StateStore, tenant: &TenantKey, vm_id: &MicrovmId) {
+    if let Err(e) = store.release(tenant, vm_id).await {
+        tracing::warn!(microvm = %vm_id, error = %e, "sentinel marker release failed; maintain retries it");
+    }
+}
+
 /// Destroys a VM whose store ownership could not be resolved. First it
 /// pins a sentinel binding (`{LOST_TENANT_PREFIX}{vm}`) — once that
 /// lands, the store itself durably tracks the VM and `maintain`
@@ -652,7 +661,7 @@ async fn reap_lost(
     if pinned {
         // Clear the marker — best effort: a marker left behind records
         // a dead VM, which `maintain` also releases on sight.
-        let _ = store.release(&sentinel.tenant, vm_id).await;
+        release_marker(store.as_ref(), &sentinel.tenant, vm_id).await;
     }
     tokens.invalidate(vm_id);
 }
@@ -1239,7 +1248,7 @@ impl SandboxPool {
                 match self.cp.terminate(&s.id).await {
                     Ok(()) | Err(Error::NotFound { .. }) | Err(Error::Terminated(_)) => {
                         if pinned {
-                            let _ = self.store.release(&sentinel.tenant, &s.id).await;
+                            release_marker(self.store.as_ref(), &sentinel.tenant, &s.id).await;
                         }
                         self.tokens.invalidate(&s.id);
                         report.reaped += 1;
@@ -1794,7 +1803,7 @@ impl SandboxPool {
                     // Bound: the pin we just made is stale — the
                     // binding owns the VM. Drop it best-effort.
                     if matches!(ownership, Ownership::Bound) {
-                        let _ = store.release(&marker.tenant, &vm_id).await;
+                        release_marker(store.as_ref(), &marker.tenant, &vm_id).await;
                     }
                     (ownership, slot)
                 };
@@ -1809,7 +1818,7 @@ impl SandboxPool {
                                 // destroys the VM rather than leaking
                                 // it untracked.
                                 slot.place_warm(fresh);
-                                let _ = store.release(&marker.tenant, &vm_id).await;
+                                release_marker(store.as_ref(), &marker.tenant, &vm_id).await;
                             }
                             _ => {
                                 crate::metrics::record_terminate();
@@ -1818,7 +1827,8 @@ impl SandboxPool {
                                     | Err(Error::NotFound { .. })
                                     | Err(Error::Terminated(_)) => {
                                         tokens.invalidate(&vm_id);
-                                        let _ = store.release(&marker.tenant, &vm_id).await;
+                                        release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                            .await;
                                     }
                                     // Terminate failed — park it in
                                     // warm only when it proves live (a
@@ -1826,19 +1836,22 @@ impl SandboxPool {
                                     Err(_) => match cp.get(&vm_id).await {
                                         Ok(fresh) if fresh.is_live() => {
                                             slot.place_warm(fresh);
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                         // Confirmed dead — clear the
                                         // marker, drop the VM.
                                         Ok(_) => {
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                         // Inconclusive — keep the
                                         // snapshot tracked in warm for
                                         // the sweep.
                                         Err(_) => {
                                             slot.place_warm(vm);
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                     },
                                 }
