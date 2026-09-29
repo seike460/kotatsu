@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Runs the build jobs on any ref without publishing, to try a change
+  # to this workflow before tagging.
+  workflow_dispatch:
 
 # Default to read-only; the publish job declares `contents: write` on
 # itself so a compromised build step cannot touch the release.
@@ -25,13 +28,26 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1 (master HEAD — synthetic toolchain refs are GC'd)
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: check the tag against the crate versions
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          for pkg in kotatsu-cli kotatsud; do
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$pkg" '.packages[] | select(.name == $pkg) | .version')
+            if [ "$version" != "${GITHUB_REF_NAME#v}" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match $pkg $version"
+              exit 1
+            fi
+          done
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --locked
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         if: matrix.glibc
         with:
@@ -60,7 +76,7 @@ jobs:
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
-          tar czf "$OLDPWD/dist/kotatsu-${{ matrix.target }}.tar.gz" kotatsu kotatsud
+          tar czf "$OLDPWD/dist/kotatsu-${{ matrix.target }}.tar.gz" kotatsu kotatsud -C "$OLDPWD" LICENSE-MIT LICENSE-APACHE README.md
           cd "$OLDPWD/dist"
           if command -v sha256sum >/dev/null; then sha256sum *.tar.gz; else shasum -a 256 *.tar.gz; fi > checksums-${{ matrix.target }}.sha256
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -71,6 +87,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,3 +102,4 @@ jobs:
             *.tar.gz
             checksums-*.sha256
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

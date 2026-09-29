@@ -173,6 +173,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `Dockerfile` pins `rust:1-bookworm` and `debian:bookworm-slim` by
   digest, so a rebuild of the same source uses the same base images.
   Dependabot moves the pins.
+- Release tarballs also contain `LICENSE-MIT`, `LICENSE-APACHE` and
+  `README.md`. A tag with a pre-release suffix, such as `v0.2.0-rc.1`,
+  is published as a GitHub pre-release.
 
 ## [0.1.0] - 2026-09-28
 
