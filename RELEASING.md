@@ -20,21 +20,30 @@ CI は `--locked` で動くので、`Cargo.lock` が古いままだと失敗し�
 - 末尾の `[Unreleased]` のリンクを `compare/vX.Y.Z...HEAD` に直します
 - `[X.Y.Z]: https://github.com/seike460/kotatsu/compare/vP.Q.R...vX.Y.Z` を足します
 
-## 3. crates.io の案内を直す(crates.io に公開する版だけ)
+## 3. 公開の前に確かめる
 
-次の 2 か所は、crates.io に未公開の前提で「公開後は」と書いています。初めて公開する版で現在形に直します。
-
-- `README.md` の Install 節
-- `crates/kotatsu-cli/README.md` の末尾の段落
-
-## 4. tag の前に確かめる
-
-- main の CI が通っていること
+- main の CI が通っていること(release commit を含む PR を merge した後の main)
 - `cargo publish --workspace --dry-run --locked` が通ること
-- 必要なら、Actions の `release` を手動で実行します(`workflow_dispatch`)。
-  ビルドとパッケージまでを行い、Release は作りません
+- `release.yml` を変えた版では、Actions の `release` を main で手動実行します(`workflow_dispatch`)。
+  3 つのビルドと glibc の検査が通ることを確かめます。手動実行ではビルドとパッケージまでを行い、Release は作りません
+
+## 4. crates.io に公開する
+
+`README.md` と `crates/kotatsu-cli/README.md` は、crates.io から入れる手順を案内しています。
+merge の後はこの手順まで続けて行い、GitHub Release より先に crate を公開します。
+crates.io の公開は取り消せません(yank しかできません)。
+
+```console
+cargo publish --workspace --locked
+```
+
+cargo が依存順(`kotatsu` → `kotatsu-dev` → `kotatsud`・`kotatsu-cli`)に公開します。
+依存先の crate が index に現れるのを待ってから、次の crate を公開します。
+この公開はまとめて成功するとは限りません。途中で失敗したら、残りの crate を `-p` で指定して公開し直します。
 
 ## 5. tag を push する
+
+crates.io の公開が済んでから tag を push します。Release が見えた時点で、案内どおりに `cargo install` できるようにするためです。
 
 ```console
 git tag -s vX.Y.Z -m "kotatsu vX.Y.Z"
@@ -45,15 +54,5 @@ git push origin vX.Y.Z
 各プラットフォームの tarball と checksum を GitHub Release に載せます。
 tag に `-` が入る版(`v0.2.0-rc.1` など)は pre-release になります。
 Release の本文は GitHub の自動生成ノートになるので、CHANGELOG の `[X.Y.Z]` 節に差し替えます。
-
-## 6. crates.io に公開する(公開する版だけ)
-
-crates.io の公開は取り消せません(yank しかできません)。Release のビルドが通ってから行います。
-
-```console
-cargo publish --workspace --locked
-```
-
-cargo が依存順(`kotatsu` → `kotatsu-dev` → `kotatsud`・`kotatsu-cli`)に公開します。
-依存先の crate が index に現れるのを待ってから、次の crate を公開します。
-この公開はまとめて成功するとは限りません。途中で失敗したら、残りの crate を `-p` で指定して公開し直します。
+Release のビルドが失敗したら、原因を直してから workflow を再実行します。コードの修正が要るときは、
+crates.io の版と食い違わないように、次の patch 版として出し直します。
