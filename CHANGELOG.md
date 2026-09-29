@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body is a fixed message per status (e.g. `upstream unavailable`), and
   the error itself — VM endpoint URL, MicroVM ID, AWS error message —
   is logged at `warn` with the tenant.
+  URL queries in that log line are replaced with `?REDACTED`: the
+  proxied request carries the client's query verbatim, and the HTTP and
+  WebSocket client errors repeat the URL.
 - kotatsud also strips `Service-Worker-Allowed`, `Clear-Site-Data`,
   `NEL` and `Report-To` from upstream responses, as it already did
   `Strict-Transport-Security` and `Alt-Svc`. All tenants share the
@@ -138,10 +141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Releases tarball and `cargo install --git`. Before, it suggested
   `cargo install --path crates/kotatsud`, which works only inside a
   clone of the repository.
-- Docs: the kotatsu-cli crate README no longer tells users to
-  `cargo install kotatsu-cli`; the crates are not on crates.io yet. It
-  installs both binaries from GitHub and states that `serve` needs
-  `kotatsud` on `PATH`.
+- Docs: the kotatsu-cli crate README installs both binaries (from
+  crates.io or GitHub) and states that `serve` needs `kotatsud` on
+  `PATH`. The 0.1.0 README suggested `cargo install kotatsu-cli` before
+  the crates were published.
 - The Linux release binaries run on glibc 2.28 and later (Amazon
   Linux 2023, Debian 10+, Ubuntu 20.04+, RHEL 8+). The v0.1.0 ones
   were linked against the build runner's glibc 2.39 and failed to
