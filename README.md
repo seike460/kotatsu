@@ -124,8 +124,6 @@ Releases の Linux 版(x86_64 / aarch64)は glibc 2.28 以上で動きます
 
 crates.io 公開後は `cargo install kotatsu-cli` / `cargo install kotatsud` で入り、
 ライブラリとしては `cargo add kotatsu` で組み込めます。
-crates.io への公開は依存順に `kotatsu` → `kotatsu-dev` → `kotatsud` → `kotatsu-cli` の順で行います
-(後続クレートの `cargo publish` は先行クレートが index に現れてから)。
 
 ## Build & test
 
