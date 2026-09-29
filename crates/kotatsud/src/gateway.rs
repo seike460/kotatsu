@@ -217,7 +217,9 @@ fn err_response(e: &Error, tenant: &TenantKey) -> Response {
 
 /// Error text for the log with every URL query replaced: the proxied
 /// target carries the client's query verbatim, and reqwest and
-/// tungstenite errors echo the URL they failed on.
+/// tungstenite errors echo the URL they failed on. That URL is
+/// serialized, so it holds no whitespace: everything from `?` to the next
+/// whitespace goes, including any `)` or quote inside the query.
 fn redact_queries(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -225,10 +227,7 @@ fn redact_queries(text: &str) -> String {
         out.push(c);
         if c == '?' {
             out.push_str("REDACTED");
-            while chars
-                .next_if(|n| !n.is_whitespace() && !matches!(n, ')' | ']' | '>' | '"' | '\''))
-                .is_some()
-            {}
+            while chars.next_if(|n| !n.is_whitespace()).is_some() {}
         }
     }
     out
@@ -679,7 +678,12 @@ mod tests {
             redact_queries(
                 "error sending request for url (http://10.0.0.1:8080/p?token=s3cret&x=1)"
             ),
-            "error sending request for url (http://10.0.0.1:8080/p?REDACTED)"
+            "error sending request for url (http://10.0.0.1:8080/p?REDACTED"
+        );
+        // Delimiters inside the query must not end the redaction.
+        assert_eq!(
+            redact_queries("url (http://h/p?token=s3cret)tail\"q'x>y]z): refused"),
+            "url (http://h/p?REDACTED refused"
         );
         assert_eq!(
             redact_queries("Unable to connect to wss://h/ws?key=abc: refused"),
@@ -717,7 +721,7 @@ mod tests {
         // Port 1 refuses the connection: a real reqwest error that
         // carries the request URL, as a dead VM endpoint does.
         let err = reqwest::Client::new()
-            .get("http://127.0.0.1:1/app?token=s3cret")
+            .get("http://127.0.0.1:1/app?token=s3cret)tail")
             .send()
             .await
             .unwrap_err();
@@ -726,6 +730,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
         let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
         assert!(text.contains("proxy request failed"), "{text}");
-        assert!(!text.contains("s3cret"), "{text}");
+        assert!(!text.contains("s3cret") && !text.contains("tail"), "{text}");
     }
 }
