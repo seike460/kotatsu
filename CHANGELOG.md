@@ -145,6 +145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were linked against the build runner's glibc 2.39 and failed to
   start on an older glibc, such as Amazon Linux 2023's, with
   `version 'GLIBC_2.39' not found`.
+- Docs: CONCEPT.md no longer says that `kotatsu dev` starts the app in
+  a container: it proxies to an app already listening at `--app-url`.
+  Its hook list now includes `/validate`, the roadmap lists the
+  features shipped in v0.1 under v0.1 instead of v0.2, and the license
+  section is no longer a draft.
 
 ### Changed
 
