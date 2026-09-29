@@ -23,6 +23,13 @@ its default, if any.
 without authentication. The metric names are documented in
 `kotatsu::metrics::names`.
 
+WebSocket handshakes to the VM carry only the WebSocket and contract
+headers. The client's `Cookie`, `Origin`, subprotocols and other
+headers do not reach the VM, and unlike HTTP requests there is no
+`x-forwarded-*`. A WebSocket app that authenticates by cookie needs
+another way, such as a token in the query string: the query reaches
+the VM without kotatsud's own `key` parameter.
+
 On SIGTERM or SIGINT, kotatsud stops accepting connections and gives
 open ones 20 seconds to finish before it closes them and exits; a
 response streamed from a VM (SSE, a long download) may never end on

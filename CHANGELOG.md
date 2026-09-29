@@ -150,6 +150,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its hook list now includes `/validate`, the roadmap lists the
   features shipped in v0.1 under v0.1 instead of v0.2, and the license
   section is no longer a draft.
+- Docs: README's security model no longer says that the `Set-Cookie`
+  path clamp keeps cookies from crossing tenants. The clamp stops a
+  VM's `Path=/` cookie from reaching other tenants' VMs, but all
+  tenants share one origin: a tenant's page can read and write another
+  tenant's non-`HttpOnly` cookies from a same-origin iframe, and
+  `localStorage` and IndexedDB are shared. Tenants that serve untrusted
+  browser content need a host (origin) each.
+- Docs: README and the kotatsud crate README state that WebSocket
+  handshakes to the VM carry only the contract headers. The client's
+  `Cookie`, `Origin`, subprotocols and other headers do not reach the
+  VM, and `x-forwarded-*` is set on HTTP requests only.
 
 ### Changed
 
