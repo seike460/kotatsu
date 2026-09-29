@@ -112,7 +112,7 @@ JWE 60 分制限、suspend/resume 調停、warm pool 不在。公式サンプル
 - https://github.com/aws-samples/sample-lambda-microvm-claude-managed-agents
 - https://github.com/aws-samples/sample-host-colyseus-on-awslambda-microvms
 
-## 料金調査(T5, aws.amazon.com/lambda/pricing "Lambda MicroVMs" 節)
+## 料金調査(aws.amazon.com/lambda/pricing "Lambda MicroVMs" 節)
 
 us-east-1 / ARM(Graviton) の公式単価:
 

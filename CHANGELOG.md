@@ -161,6 +161,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handshakes to the VM carry only the contract headers. The client's
   `Cookie`, `Origin`, subprotocols and other headers do not reach the
   VM, and `x-forwarded-*` is set on HTTP requests only.
+- Docs: README's crate table names the CLI crate `kotatsu-cli` (its
+  command is `kotatsu`) instead of a second `kotatsu`, and its status
+  section points to CONCEPT.md §8 for what is not yet verified on AWS
+  instead of calling §8 the roadmap.
 
 ### Changed
 

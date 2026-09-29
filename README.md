@@ -13,7 +13,7 @@ AWS Lambda MicroVMs の上でマルチテナントのサンドボックス製品
 - `kotatsu dev`: AWS 契約をローカルでエミュレートする開発モード
 
 コンセプトと調査結果は **[CONCEPT.md](./CONCEPT.md)**、
-1 時間のインターネット調査ログは **[docs/research.md](./docs/research.md)** を参照。
+調査ログは **[docs/research.md](./docs/research.md)** を参照。
 
 ## Crates
 
@@ -22,7 +22,7 @@ AWS Lambda MicroVMs の上でマルチテナントのサンドボックス製品
 | `kotatsu` | core library — ControlPlane trait、AWS 実装、warm pool、token vending、endpoint client、waiter、cost/metrics、Memory/SQLite store |
 | `kotatsud` | セッションゲートウェイデーモン(HTTP/WS プロキシ・Bearer 認証・/metrics) |
 | `kotatsu-dev` | ローカル契約エミュレータ(ライフサイクルフック駆動・プロキシ契約・制御 API) |
-| `kotatsu` (CLI, `crates/kotatsu-cli`) | 管理 CLI(`vm`/`token`/`image`/`tag`/`dev`/`cost`/`serve`) |
+| `kotatsu-cli`(コマンド名 `kotatsu`) | 管理 CLI(`vm`/`token`/`image`/`tag`/`dev`/`cost`/`serve`) |
 
 ## Quickstart(ローカル、AWS 不要)
 
@@ -131,7 +131,7 @@ crates.io への公開は依存順に `kotatsu` → `kotatsu-dev` → `kotatsud`
 
 ```console
 cargo build --workspace
-cargo test  --workspace --all-features
+cargo test  --workspace
 cargo run   --example warm_pool -p kotatsu   # Mock 上の warm pool デモ
 ```
 
@@ -147,7 +147,8 @@ docker run --entrypoint kotatsu kotatsu vm list   # CLI も同梱
 
 ## Status
 
-v0.1 — core・gateway・emulator・CLI が実装済み。AWS 実契約の統合検証(実アカウントでの run/suspend/resume 計測)はロードマップ(CONCEPT.md §8)の範囲です。
+v0.1 — core・gateway・emulator・CLI が実装済み。AWS の実アカウントでの統合検証(run/suspend/resume の計測)はまだ行っていません。
+未検証の事項は [CONCEPT.md](./CONCEPT.md) の §8(リスク・未検証事項)にまとめています。
 
 ## License
 
