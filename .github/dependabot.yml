@@ -10,3 +10,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+  # The Dockerfile pins its base images as `tag@sha256:…`; Dependabot
+  # moves the digest when the tag is republished.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly

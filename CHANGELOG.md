@@ -165,6 +165,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `sqlite` feature moves to tokio-rusqlite 0.8 (rusqlite 0.40,
   `libsqlite3-sys` 0.38). Only one `libsqlite3-sys` can link into a
   build, so an application that also uses `rusqlite` needs 0.40.
+- The `Dockerfile` pins `rust:1-bookworm` and `debian:bookworm-slim` by
+  digest, so a rebuild of the same source uses the same base images.
+  Dependabot moves the pins.
 
 ## [0.1.0] - 2026-09-28
 
