@@ -1,7 +1,7 @@
 [package]
 name = "kotatsu"
 description = "Sandbox fleet control plane and session gateway core for AWS Lambda MicroVMs"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

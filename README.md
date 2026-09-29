@@ -122,7 +122,7 @@ cargo install --locked --path crates/kotatsud      # `kotatsud` ゲートウェ�
 Releases の Linux 版(x86_64 / aarch64)は glibc 2.28 以上で動きます
 (Amazon Linux 2023、Debian 10 以降、Ubuntu 20.04 以降、RHEL 8 以降)。
 
-crates.io 公開後は `cargo install kotatsu-cli` / `cargo install kotatsud` で入り、
+crates.io からは `cargo install --locked kotatsu-cli kotatsud` で入り、
 ライブラリとしては `cargo add kotatsu` で組み込めます。
 
 ## Build & test

@@ -15,8 +15,8 @@ cargo install --locked --git https://github.com/seike460/kotatsu kotatsu-cli kot
 kotatsu vm list
 ```
 
-After the crates are published to crates.io,
-`cargo install --locked kotatsu-cli kotatsud` works as well.
+They are also on crates.io:
+`cargo install --locked kotatsu-cli kotatsud`.
 
 See the [repository](https://github.com/seike460/kotatsu).
 
