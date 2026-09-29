@@ -56,7 +56,8 @@ UpdateMicrovmImage / UpdateMicrovmImageVersion
   モック payload を流すと snapshot のホット領域最適化にも効く)
 - Runtime 用: `/run`(runHookPayload ≤16KB + microvmId が body で届く)、
   `/resume`、`/suspend`、`/terminate`。いずれも hooks.port で指定したポートに
-  Lambda が HTTP 呼出。フック失敗/timeout → TERMINATING 直行の落とし穴あり。
+  Lambda が HTTP 呼出。`/run` の失敗/timeout で RUNNING を経ず TERMINATING に
+  直行しうる。auto-resume(`/resume` フックを含む)が失敗すると呼び出し元に 502。
 - State: PENDING→RUNNING→SUSPENDING→SUSPENDED→RUNNING→TERMINATING→TERMINATED。
 - 注意: ビルド時に生成した一意な値(ID/シークレット/接続)は同一イメージ全 VM で
   共有される → `/run` で生成する設計が必須。
@@ -111,7 +112,7 @@ JWE 60 分制限、suspend/resume 調停、warm pool 不在。公式サンプル
 - https://github.com/aws-samples/sample-lambda-microvm-claude-managed-agents
 - https://github.com/aws-samples/sample-host-colyseus-on-awslambda-microvms
 
-## 料金調査(T5, aws.amazon.com/lambda/pricing "Lambda MicroVMs" 節)
+## 料金調査(aws.amazon.com/lambda/pricing "Lambda MicroVMs" 節)
 
 us-east-1 / ARM(Graviton) の公式単価:
 

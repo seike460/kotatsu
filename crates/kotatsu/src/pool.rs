@@ -81,6 +81,11 @@ pub struct PoolConfig {
     /// and terminated. With it off (the safe default), recovery still
     /// covers every VM that got a durable sentinel marker; only the
     /// never-pinned gap needs the reconcile.
+    ///
+    /// Requires `run_request.image_identifier` to be the image ARN, not
+    /// an image ID: `list-microvms` reports each VM's image as an ARN
+    /// and the reconcile compares it verbatim, so an ID would match
+    /// nothing. [`SandboxPool::new`] rejects a non-ARN identifier.
     pub reap_lost_vms: bool,
 }
 
@@ -105,6 +110,11 @@ impl PoolConfig {
 
     fn validate(&self) -> Result<()> {
         self.run_request.validate()?;
+        if self.reap_lost_vms && !self.run_request.image_identifier.starts_with("arn:") {
+            return Err(Error::invalid(
+                "reap_lost_vms requires run_request.image_identifier to be the image ARN",
+            ));
+        }
         if self.warm_size > self.max_vms {
             return Err(Error::invalid("warm_size must not exceed max_vms"));
         }
@@ -201,7 +211,9 @@ impl WarmWindow {
 pub struct PoolReport {
     /// New VMs launched to top up the warm set.
     pub warmed: usize,
-    /// VMs terminated for exceeding `max_age`.
+    /// VMs terminated by the reaper: past `max_age`, marked by a
+    /// sentinel binding, or found by the lost-VM reconcile
+    /// ([`PoolConfig::reap_lost_vms`]).
     pub reaped: usize,
     /// Bindings dropped because their VM is gone.
     pub bindings_dropped: usize,
@@ -392,6 +404,49 @@ fn registry_overlap(g: &PoolInner, normal: &HashSet<&MicrovmId>) -> (usize, usiz
     (warm_extra, inflight_extra)
 }
 
+/// VM ids owned by normal (tenant) bindings — sentinel markers excluded.
+fn normal_bound_ids(bindings: &[Binding]) -> HashSet<&MicrovmId> {
+    bindings
+        .iter()
+        .filter(|b| !b.sentinel)
+        .map(|b| &b.microvm_id)
+        .collect()
+}
+
+/// `(warm, inflight, assigned, lost)` with every physical VM counted
+/// once — the one formula behind both `stats` and `try_reserve`'s
+/// `max_vms` check. `normal` is [`normal_bound_ids`] of `bindings`.
+///
+/// Sentinel markers are not assignments. A sentinel whose VM a live
+/// reaper (`pending`), a `warm` entry, or a normal binding already
+/// holds counts there; only a marker held nowhere else (post-restart,
+/// or a reaper that gave up) counts as `lost`. `registry_overlap`
+/// drops the surplus appearances a VM picks up across the other
+/// registries.
+fn managed_counts(
+    g: &PoolInner,
+    bindings: &[Binding],
+    normal: &HashSet<&MicrovmId>,
+) -> (usize, usize, usize, usize) {
+    let (assigned, lost) = bindings.iter().fold((0, 0), |(a, l), b| {
+        if b.sentinel {
+            let held = g.pending.contains_key(&b.microvm_id)
+                || g.warm.iter().any(|v| v.id == b.microvm_id)
+                || normal.contains(&b.microvm_id);
+            (a, l + usize::from(!held))
+        } else {
+            (a + 1, l)
+        }
+    });
+    let (warm_extra, inflight_extra) = registry_overlap(g, normal);
+    (
+        g.warm.len() - warm_extra,
+        g.inflight - inflight_extra,
+        assigned,
+        lost,
+    )
+}
+
 /// Capacity reservation that also *owns* the in-handoff VM.
 ///
 /// A popped or freshly-launched VM is untracked between materialization
@@ -525,13 +580,6 @@ fn sentinel_binding(vm_id: &MicrovmId) -> Binding {
     }
 }
 
-/// True when `b` is a sentinel marker — decided by the explicit flag
-/// the store persists, not the tenant string. A historical tenant that
-/// legitimately used the reserved prefix stays a normal binding.
-fn is_sentinel(b: &Binding) -> bool {
-    b.sentinel
-}
-
 /// True when a `claim` result proves the sentinel marker is persisted
 /// for this VM — `Claimed`, or an earlier *sentinel* pin for the
 /// *same* VM. A `HeldByOther` naming a different VM — or a row that
@@ -550,6 +598,15 @@ fn sentinel_pinned(outcome: &Result<ClaimOutcome>, vm_id: &MicrovmId) -> bool {
 /// may touch it. Destroying such a VM would orphan the binding.
 fn bound_to_other(outcome: &Result<ClaimOutcome>, vm_id: &MicrovmId) -> bool {
     matches!(outcome, Ok(ClaimOutcome::HeldByOther(b)) if !b.sentinel && b.microvm_id == *vm_id)
+}
+
+/// Drops a sentinel marker, best effort: a marker left behind only
+/// records a dead or re-owned VM, which `maintain` releases on sight —
+/// but a failing store must still show up in the logs.
+async fn release_marker(store: &dyn StateStore, tenant: &TenantKey, vm_id: &MicrovmId) {
+    if let Err(e) = store.release(tenant, vm_id).await {
+        tracing::warn!(microvm = %vm_id, error = %e, "sentinel marker release failed; maintain retries it");
+    }
 }
 
 /// Destroys a VM whose store ownership could not be resolved. First it
@@ -604,7 +661,7 @@ async fn reap_lost(
     if pinned {
         // Clear the marker — best effort: a marker left behind records
         // a dead VM, which `maintain` also releases on sight.
-        let _ = store.release(&sentinel.tenant, vm_id).await;
+        release_marker(store.as_ref(), &sentinel.tenant, vm_id).await;
     }
     tokens.invalidate(vm_id);
 }
@@ -793,6 +850,7 @@ impl SandboxPool {
             maintaining: AtomicBool::new(false),
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
     }
@@ -1012,15 +1070,10 @@ impl SandboxPool {
         // failure while still applying its write. The binding owns it;
         // drop it from `warm` so no second tenant can be handed the
         // same VM.
-        let bound: std::collections::HashSet<&MicrovmId> =
-            bindings.iter().map(|b| &b.microvm_id).collect();
+        let bound: HashSet<&MicrovmId> = bindings.iter().map(|b| &b.microvm_id).collect();
         // Ownership snapshots for marker-vs-VM coexistence checks —
         // shared with the lost-VM reconcile below.
-        let normal_bound: std::collections::HashSet<&MicrovmId> = bindings
-            .iter()
-            .filter(|b| !b.sentinel)
-            .map(|b| &b.microvm_id)
-            .collect();
+        let normal_bound = normal_bound_ids(&bindings);
         let (warm_ids, pending_ids) = {
             let g = self.inner.lock();
             (
@@ -1035,7 +1088,7 @@ impl SandboxPool {
             // be resolved — destroy on sight and clear the marker.
             // The row is the durable record, so reaping works even
             // after a restart that lost the in-flight reaper task.
-            if is_sentinel(b) {
+            if b.sentinel {
                 // A reaper/cleanup slot holds the VM — the live task
                 // owns the marker lifecycle (it may be mid-handoff
                 // between pin and release), so the marker is never
@@ -1195,7 +1248,7 @@ impl SandboxPool {
                 match self.cp.terminate(&s.id).await {
                     Ok(()) | Err(Error::NotFound { .. }) | Err(Error::Terminated(_)) => {
                         if pinned {
-                            let _ = self.store.release(&sentinel.tenant, &s.id).await;
+                            release_marker(self.store.as_ref(), &sentinel.tenant, &s.id).await;
                         }
                         self.tokens.invalidate(&s.id);
                         report.reaped += 1;
@@ -1356,8 +1409,10 @@ impl SandboxPool {
         Ok(report)
     }
 
-    /// Spawns a background task calling [`SandboxPool::maintain`] every
-    /// `maintenance_interval`. Abort the returned handle to stop it —
+    /// Spawns a background task calling [`SandboxPool::maintain`] at
+    /// once, then every `maintenance_interval`, so the warm set and
+    /// restart recovery start without waiting a full interval. Abort
+    /// the returned handle to stop it —
     /// aborting is safe mid-tick: state locks are never held across
     /// `.await`, swept warm VMs are restored by an internal guard, the
     /// `maintaining` flag resets via `Drop`, and an in-flight `run` is
@@ -1366,10 +1421,10 @@ impl SandboxPool {
         let pool = Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(pool.cfg.maintenance_interval).await;
                 if let Err(e) = pool.maintain().await {
                     tracing::warn!(error = %e, "pool maintenance tick failed");
                 }
+                tokio::time::sleep(pool.cfg.maintenance_interval).await;
             }
         })
     }
@@ -1385,48 +1440,19 @@ impl SandboxPool {
     ///
     /// The store list and the in-memory sets are read a moment apart,
     /// so individual buckets may straddle a handoff — but the dedup
-    /// rules below count every cross-registry appearance once, so the
+    /// rules count every cross-registry appearance once, so the
     /// returned counters never name the same physical VM twice.
+    ///
+    /// Also refreshes the pool gauges. If the store cannot be listed,
+    /// `assigned` and `lost` read 0, the failure is logged, and the
+    /// gauges keep their last values instead of dropping to 0.
     pub async fn stats(&self) -> PoolStats {
-        // Sentinels are not tenant bindings. One whose VM a live
-        // reaper, a `warm` entry, or a normal binding already holds is
-        // carried there; report in `lost` only the markers tracking
-        // the VM nowhere else (post-restart or abandoned). `inflight`
-        // likewise drops the pending slots whose VM already sits in
-        // `warm` — a sibling cleanup parked it — so
-        // `warm + inflight + assigned + lost` counts each VM once.
-        let (warm, inflight, assigned, lost) = match self.store.list().await {
-            Ok(l) => {
-                let normal: HashSet<&MicrovmId> = l
-                    .iter()
-                    .filter(|b| !b.sentinel)
-                    .map(|b| &b.microvm_id)
-                    .collect();
-                let g = self.inner.lock();
-                let (assigned, lost) = l.iter().fold((0, 0), |(a, s), b| {
-                    if is_sentinel(b) {
-                        let held = g.pending.contains_key(&b.microvm_id)
-                            || g.warm.iter().any(|v| v.id == b.microvm_id)
-                            || normal.contains(&b.microvm_id);
-                        (a, s + usize::from(!held))
-                    } else {
-                        (a + 1, s)
-                    }
-                });
-                let (warm_extra, inflight_extra) = registry_overlap(&g, &normal);
-                (
-                    g.warm.len() - warm_extra,
-                    g.inflight - inflight_extra,
-                    assigned,
-                    lost,
-                )
-            }
-            Err(_) => {
-                let g = self.inner.lock();
-                let empty = HashSet::new();
-                let (warm_extra, inflight_extra) = registry_overlap(&g, &empty);
-                (g.warm.len() - warm_extra, g.inflight - inflight_extra, 0, 0)
-            }
+        let listed = self.store.list().await;
+        let (warm, inflight, assigned, lost) = {
+            let bindings = listed.as_deref().unwrap_or_default();
+            let normal = normal_bound_ids(bindings);
+            let g = self.inner.lock();
+            managed_counts(&g, bindings, &normal)
         };
         let stats = PoolStats {
             warm,
@@ -1435,19 +1461,28 @@ impl SandboxPool {
             lost,
             max_vms: self.cfg.max_vms,
         };
-        crate::metrics::set_pool_stats(&stats);
+        match &listed {
+            Ok(_) => crate::metrics::set_pool_stats(&stats),
+            Err(e) => {
+                tracing::warn!(error = %e, "pool stats: store list failed; gauges keep their last values");
+            }
+        }
         stats
     }
 
-    /// Terminates every pool-managed VM and clears all bindings.
+    /// Terminates every pool-managed VM and releases its binding.
     ///
     /// For embedders performing a full teardown — e.g. a dev-mode
     /// process exiting or test cleanup. `kotatsud` deliberately does
     /// *not* call this on shutdown: bindings persist in the state store
-    /// and the VMs keep running for the next start. A failed
-    /// `terminate` leaves its VM tracked — warm VMs return to `warm`,
-    /// bindings stay bound — so a later `drain`/`maintain` can retry
-    /// rather than leaking a live VM nobody reaps.
+    /// and the VMs keep running for the next start.
+    ///
+    /// Best effort: only a failed `store.list` returns `Err`. A failed
+    /// `terminate` is logged and leaves its VM tracked — warm VMs
+    /// return to `warm`, bindings stay bound — so a later
+    /// `drain`/`maintain` can retry rather than leaking a live VM
+    /// nobody reaps. A failed binding release after the VM is gone is
+    /// logged too; the next `acquire` or `maintain` drops that binding.
     ///
     /// Not atomic: an `acquire` racing `drain` may land a new VM after
     /// the sweep, and a concurrent `maintain` sweep can restore VMs it
@@ -1486,7 +1521,9 @@ impl SandboxPool {
             let res = self.cp.terminate(&b.microvm_id).await;
             match res {
                 Ok(()) | Err(Error::NotFound { .. }) | Err(Error::Terminated(_)) => {
-                    let _ = self.store.release(&b.tenant, &b.microvm_id).await;
+                    if let Err(e) = self.store.release(&b.tenant, &b.microvm_id).await {
+                        tracing::warn!(microvm = %b.microvm_id, error = %e, "drain: binding release failed");
+                    }
                     self.tokens.invalidate(&b.microvm_id);
                 }
                 Err(e) => {
@@ -1503,32 +1540,11 @@ impl SandboxPool {
     /// the store between our `list()` and our counter update.
     async fn try_reserve(&self) -> Result<Handoff<'_>> {
         let _cap = self.capacity.lock().await;
-        // Sentinel markers are not assignments. A sentinel whose VM a
-        // live reaper, a `warm` entry, or a normal binding already
-        // holds counts there; one held nowhere (post-restart, or a
-        // reaper that gave up) counts via its marker — either way
-        // exactly once. `registry_overlap` drops the surplus
-        // appearances a VM picks up across the other registries.
         let bindings = self.store.list().await?;
-        let normal: HashSet<&MicrovmId> = bindings
-            .iter()
-            .filter(|b| !b.sentinel)
-            .map(|b| &b.microvm_id)
-            .collect();
+        let normal = normal_bound_ids(&bindings);
         let mut g = self.inner.lock();
-        let (assigned, lost_unheld) = bindings.iter().fold((0, 0), |(a, l), b| {
-            if is_sentinel(b) {
-                let held = g.pending.contains_key(&b.microvm_id)
-                    || g.warm.iter().any(|v| v.id == b.microvm_id)
-                    || normal.contains(&b.microvm_id);
-                (a, l + usize::from(!held))
-            } else {
-                (a + 1, l)
-            }
-        });
-        let (warm_extra, inflight_extra) = registry_overlap(&g, &normal);
-        let managed =
-            g.warm.len() - warm_extra + g.inflight - inflight_extra + assigned + lost_unheld;
+        let (warm, inflight, assigned, lost) = managed_counts(&g, &bindings, &normal);
+        let managed = warm + inflight + assigned + lost;
         if managed >= self.cfg.max_vms {
             return Err(Error::PoolExhausted(managed));
         }
@@ -1683,7 +1699,6 @@ impl SandboxPool {
             let inner = Arc::clone(&self.inner);
             let capacity = Arc::clone(&self.capacity);
             let tenant = tenant.clone();
-            let vm_id = vm_id.clone();
             async move {
                 /// The VM's ownership after the release attempt.
                 enum Ownership {
@@ -1788,7 +1803,7 @@ impl SandboxPool {
                     // Bound: the pin we just made is stale — the
                     // binding owns the VM. Drop it best-effort.
                     if matches!(ownership, Ownership::Bound) {
-                        let _ = store.release(&marker.tenant, &vm_id).await;
+                        release_marker(store.as_ref(), &marker.tenant, &vm_id).await;
                     }
                     (ownership, slot)
                 };
@@ -1803,7 +1818,7 @@ impl SandboxPool {
                                 // destroys the VM rather than leaking
                                 // it untracked.
                                 slot.place_warm(fresh);
-                                let _ = store.release(&marker.tenant, &vm_id).await;
+                                release_marker(store.as_ref(), &marker.tenant, &vm_id).await;
                             }
                             _ => {
                                 crate::metrics::record_terminate();
@@ -1812,7 +1827,8 @@ impl SandboxPool {
                                     | Err(Error::NotFound { .. })
                                     | Err(Error::Terminated(_)) => {
                                         tokens.invalidate(&vm_id);
-                                        let _ = store.release(&marker.tenant, &vm_id).await;
+                                        release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                            .await;
                                     }
                                     // Terminate failed — park it in
                                     // warm only when it proves live (a
@@ -1820,19 +1836,22 @@ impl SandboxPool {
                                     Err(_) => match cp.get(&vm_id).await {
                                         Ok(fresh) if fresh.is_live() => {
                                             slot.place_warm(fresh);
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                         // Confirmed dead — clear the
                                         // marker, drop the VM.
                                         Ok(_) => {
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                         // Inconclusive — keep the
                                         // snapshot tracked in warm for
                                         // the sweep.
                                         Err(_) => {
                                             slot.place_warm(vm);
-                                            let _ = store.release(&marker.tenant, &vm_id).await;
+                                            release_marker(store.as_ref(), &marker.tenant, &vm_id)
+                                                .await;
                                         }
                                     },
                                 }

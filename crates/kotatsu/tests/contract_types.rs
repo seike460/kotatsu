@@ -1,8 +1,24 @@
 //! Unit tests for core contract types and the mock control plane.
 
 use kotatsu::mock::{MockBehavior, MockControlPlane};
-use kotatsu::{ControlPlane, IdlePolicyConfig, MicrovmId, PortSpec, RunRequest, State, TenantKey};
+use kotatsu::{
+    ControlPlane, IdlePolicyConfig, MicrovmId, PortSpec, RunRequest, State, TenantKey, WaitPolicy,
+    wait_for_state,
+};
 use std::time::Duration;
+
+/// Mock transitions run on wall-clock time: a transitional state
+/// asserted right after the call needs a window far wider than
+/// scheduler jitter.
+const TRANSITION: Duration = Duration::from_millis(500);
+
+fn poll() -> WaitPolicy {
+    WaitPolicy {
+        timeout: Duration::from_secs(5),
+        initial_delay: Duration::from_millis(10),
+        max_delay: Duration::from_millis(50),
+    }
+}
 
 #[test]
 fn tenant_key_validation() {
@@ -28,6 +44,13 @@ fn port_spec_parse() {
     assert_eq!(PortSpec::parse("*").unwrap(), PortSpec::All);
     assert!(PortSpec::parse("0").is_err());
     assert!(PortSpec::parse("99999").is_err());
+    assert_eq!(
+        PortSpec::parse("9000-9000").unwrap(),
+        PortSpec::Range {
+            start: 9000,
+            end: 9000
+        }
+    );
     assert!(PortSpec::parse("9010-9000").is_err());
     assert!(PortSpec::parse("abc").is_err());
 }
@@ -112,8 +135,11 @@ fn state_liveness() {
     assert!(State::Running.is_live());
     assert!(State::Suspended.is_live());
     assert!(State::Pending.is_live());
+    assert!(State::Suspending.is_live());
     assert!(!State::Terminated.is_live());
     assert!(!State::Terminating.is_live());
+    // An unknown (possibly terminal) state must never receive traffic.
+    assert!(!State::Unknown("FAILED".into()).is_live());
 }
 
 #[tokio::test]
@@ -144,14 +170,16 @@ async fn mock_run_get_suspend_resume_terminate() {
 #[tokio::test]
 async fn mock_transition_timing() {
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        boot_time: Duration::from_millis(80),
+        boot_time: TRANSITION,
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     assert_eq!(vm.state, State::Pending);
     assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Pending);
-    tokio::time::sleep(Duration::from_millis(120)).await;
-    assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Running);
+    let done = wait_for_state(&cp, &vm.id, &State::Running, &poll())
+        .await
+        .unwrap();
+    assert_eq!(done.state, State::Running);
 }
 
 #[tokio::test]
@@ -233,28 +261,33 @@ async fn terminate_during_boot_does_not_resurrect() {
 #[tokio::test]
 async fn transitional_states_are_observable() {
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        suspend_time: Duration::from_millis(50),
-        terminate_time: Duration::from_millis(50),
+        suspend_time: TRANSITION,
+        terminate_time: TRANSITION,
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     cp.suspend(&vm.id).await.unwrap();
     assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Suspending);
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Suspended);
+    let done = wait_for_state(&cp, &vm.id, &State::Suspended, &poll())
+        .await
+        .unwrap();
+    assert_eq!(done.state, State::Suspended);
     cp.resume(&vm.id).await.unwrap();
     cp.terminate(&vm.id).await.unwrap();
     assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Terminating);
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Terminated);
+    let done = wait_for_state(&cp, &vm.id, &State::Terminated, &poll())
+        .await
+        .unwrap();
+    assert_eq!(done.state, State::Terminated);
 }
 
 #[tokio::test]
-async fn double_terminate_fails() {
+async fn double_terminate_is_idempotent() {
     let cp = MockControlPlane::new();
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     cp.terminate(&vm.id).await.unwrap();
-    assert!(cp.terminate(&vm.id).await.is_err());
+    cp.terminate(&vm.id).await.unwrap();
+    assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Terminated);
     assert!(
         cp.get(&MicrovmId::new("microvm-404").unwrap())
             .await

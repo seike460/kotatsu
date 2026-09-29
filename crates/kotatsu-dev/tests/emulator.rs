@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -92,10 +92,17 @@ async fn serve(app: Router) -> SocketAddr {
 }
 
 async fn up(hooks: Hooks) -> (Emulator, String) {
-    let app = serve(hooks_app(hooks)).await;
+    up_with(hooks_app(hooks), |_| {}).await
+}
+
+/// Boots an emulator in front of `app` (hooks it lacks answer 404, i.e.
+/// "not implemented") after `tweak` adjusts the config.
+async fn up_with(app: Router, tweak: impl FnOnce(&mut EmulatorConfig)) -> (Emulator, String) {
+    let app = serve(app).await;
     let mut cfg = EmulatorConfig::new(format!("http://{app}"));
     cfg.app_port = 8080;
     cfg.ready_poll = Duration::from_millis(10);
+    tweak(&mut cfg);
     let emu = Emulator::start(cfg).await.unwrap();
     assert_eq!(emu.wait_boot().await, DevState::Running);
     let ep = emu.endpoint().to_owned();
@@ -215,7 +222,6 @@ async fn terminate_blocks_traffic() {
     let resp = authed(&http, &format!("{ep}/x")).send().await.unwrap();
     assert_eq!(resp.status(), 410);
     assert!(hooks.calls.lock().contains(&"terminate".to_string()));
-    let _ = emu; // server keeps running until dropped
 }
 
 #[tokio::test]
@@ -258,7 +264,7 @@ async fn control_state_endpoint_reports_lifecycle() {
         .json()
         .await
         .unwrap();
-    assert_eq!(r["state"], "RUNNING");
+    assert_eq!(r, serde_json::json!({"state": "RUNNING"}));
 
     let r = http
         .post(format!("{ep}/_kotatsu/suspend"))
@@ -362,7 +368,7 @@ async fn terminate_during_pending_cannot_resurrect() {
         .route(
             &hook("ready"),
             post(|| async {
-                tokio::time::sleep(Duration::from_millis(60)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 "late"
             }),
         )
@@ -382,7 +388,288 @@ async fn terminate_during_pending_cannot_resurrect() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
-    // The late /ready success lands ~60ms — the CAS must refuse it.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    // The late /ready success lands ~500ms — the CAS must refuse it.
+    tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(emu.state(), DevState::Terminated);
+}
+
+/// The app's 3xx and its `Set-Cookie` reach the client unchanged: the
+/// emulator must not follow `Location` itself (a POST 301/302 would
+/// turn into a GET and drop the redirect's cookie).
+#[tokio::test]
+async fn app_redirects_reach_the_client_unfollowed() {
+    let app = Router::new()
+        .route(
+            "/redirect/{code}",
+            post(
+                |axum::extract::Path(code): axum::extract::Path<u16>| async move {
+                    (
+                        axum::http::StatusCode::from_u16(code).unwrap(),
+                        [("location", "/home"), ("set-cookie", "sid=1; Path=/")],
+                    )
+                },
+            ),
+        )
+        .route("/home", any(|| async { "home" }));
+    let (_emu, ep) = up_with(app, |_| {}).await;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    for code in [301, 302, 303, 307, 308] {
+        let resp = authed_post(&http, &format!("{ep}/redirect/{code}"))
+            .body("user=a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), code);
+        assert_eq!(resp.headers()["location"], "/home", "{code}");
+        assert_eq!(resp.headers()["set-cookie"], "sid=1; Path=/", "{code}");
+    }
+}
+
+/// A `/terminate` hook failing mid-boot must not leave the emulator
+/// `Pending` forever: the boot task is already aborted, so it settles
+/// `Failed` and `wait_boot` returns.
+#[tokio::test]
+async fn terminate_hook_failure_during_boot_settles_failed() {
+    let app = Router::new()
+        .route(
+            &hook("ready"),
+            post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        )
+        .route(
+            &hook("terminate"),
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+    let app_addr = serve(app).await;
+    let mut cfg = EmulatorConfig::new(format!("http://{app_addr}"));
+    cfg.ready_timeout = Duration::from_secs(30);
+    let emu = Emulator::start(cfg).await.unwrap();
+    assert_eq!(emu.state(), DevState::Pending);
+
+    let r = client()
+        .post(format!("{}/_kotatsu/terminate", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    let settled = tokio::time::timeout(Duration::from_secs(5), emu.wait_boot())
+        .await
+        .expect("wait_boot must return");
+    assert_eq!(
+        settled,
+        DevState::Failed("terminate hook returned 500 Internal Server Error".into())
+    );
+    let resp = authed(&client(), &format!("{}/x", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+}
+
+/// A failed `/suspend` hook leaves the emulator `Running` (409 names the
+/// hook error); a failed auto-resume answers 502, as AWS does, and
+/// leaves it `Suspended`.
+#[tokio::test]
+async fn failed_suspend_or_resume_hook_keeps_state() {
+    let fail_suspend = Arc::new(AtomicBool::new(true));
+    let f = fail_suspend.clone();
+    let app = Router::new()
+        .route(
+            &hook("suspend"),
+            post(move || {
+                let f = f.clone();
+                async move {
+                    if f.load(Ordering::SeqCst) {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        )
+        .route(
+            &hook("resume"),
+            post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+    let (emu, ep) = up_with(app, |_| {}).await;
+    let http = client();
+
+    let r = http
+        .post(format!("{ep}/_kotatsu/suspend"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(
+        r.text().await.unwrap(),
+        "suspend hook returned 500 Internal Server Error"
+    );
+    assert_eq!(emu.state(), DevState::Running);
+
+    fail_suspend.store(false, Ordering::SeqCst);
+    emu.suspend().await.unwrap();
+    let resp = authed(&http, &format!("{ep}/x")).send().await.unwrap();
+    assert_eq!(resp.status(), 502);
+    assert_eq!(emu.state(), DevState::Suspended);
+}
+
+/// A boot hook failure settles `Failed`: the state API reports it as a
+/// plain `"FAILED"` string plus `"error"`, and traffic gets 500.
+#[tokio::test]
+async fn failed_boot_reports_state_and_answers_500() {
+    let app = Router::new().route(
+        &hook("run"),
+        post(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+    );
+    let app_addr = serve(app).await;
+    let emu = Emulator::start(EmulatorConfig::new(format!("http://{app_addr}")))
+        .await
+        .unwrap();
+    let error = "run hook returned 500 Internal Server Error";
+    assert_eq!(emu.wait_boot().await, DevState::Failed(error.into()));
+
+    let r: serde_json::Value = client()
+        .get(format!("{}/_kotatsu/state", emu.endpoint()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r, serde_json::json!({"state": "FAILED", "error": error}));
+
+    let resp = authed(&client(), &format!("{}/x", emu.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+}
+
+/// Browsers attach `Origin` to every POST: a web page must not drive
+/// the unauthenticated control API (CSRF).
+#[tokio::test]
+async fn control_api_refuses_browser_origin() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+
+    for route in ["suspend", "resume", "terminate"] {
+        let r = client()
+            .post(format!("{ep}/_kotatsu/{route}"))
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "{route}");
+    }
+    assert_eq!(emu.state(), DevState::Running);
+    assert_eq!(hooks.calls.lock().clone(), vec!["validate", "run"]);
+}
+
+/// The app's WS handshake carries the client's other headers (Cookie
+/// here) but not the contract subprotocols — AWS forwards the request
+/// minus its MicroVM subprotocols.
+#[tokio::test]
+async fn websocket_forwards_client_headers_to_app() {
+    let app = Router::new().route(
+        "/ws",
+        get(
+            |headers: axum::http::HeaderMap, ws: WebSocketUpgrade| async move {
+                let seen = serde_json::json!({
+                    "cookie": headers.get("cookie").and_then(|v| v.to_str().ok()),
+                    "protocol": headers
+                        .get("sec-websocket-protocol")
+                        .and_then(|v| v.to_str().ok()),
+                })
+                .to_string();
+                ws.on_upgrade(move |mut socket| async move {
+                    let _ = socket
+                        .send(axum::extract::ws::Message::Text(seen.into()))
+                        .await;
+                })
+            },
+        ),
+    );
+    let (_emu, ep) = up_with(app, |_| {}).await;
+    let ws_ep = ep.replacen("http://", "ws://", 1);
+
+    let mut req = format!("{ws_ep}/ws").into_client_request().unwrap();
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        "lambda-microvms, lambda-microvms.authentication.dev-token-1, lambda-microvms.port.8080"
+            .parse()
+            .unwrap(),
+    );
+    req.headers_mut().insert("cookie", "sid=1".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    let msg = ws.next().await.unwrap().unwrap();
+    let seen: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+    assert_eq!(
+        seen,
+        serde_json::json!({"cookie": "sid=1", "protocol": null})
+    );
+}
+
+/// With `auto_resume` off, traffic to a suspended emulator gets 503 and
+/// does not call `/resume`.
+#[tokio::test]
+async fn suspended_without_auto_resume_returns_503() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up_with(hooks_app(hooks.clone()), |c| c.auto_resume = false).await;
+    emu.suspend().await.unwrap();
+
+    let resp = authed(&client(), &format!("{ep}/x")).send().await.unwrap();
+    assert_eq!(resp.status(), 503);
+    assert_eq!(emu.state(), DevState::Suspended);
+    assert!(!hooks.calls.lock().contains(&"resume".to_string()));
+}
+
+/// `//host/x` must not become a network-path reference off the app's
+/// origin, and a malformed request must not wake a suspended VM.
+#[tokio::test]
+async fn network_path_target_is_400_without_resuming() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+    emu.suspend().await.unwrap();
+
+    let resp = authed(&client(), &format!("{ep}//evil.example/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        resp.text().await.unwrap(),
+        r#"{"error":"bad request target"}"#
+    );
+    assert_eq!(emu.state(), DevState::Suspended);
+    assert!(!hooks.calls.lock().contains(&"resume".to_string()));
+}
+
+/// Only exact method+path pairs are control routes: a wrong method is
+/// 405 without a transition, and other `/_kotatsu/*` paths reach the app.
+#[tokio::test]
+async fn control_routes_match_exact_method_and_path() {
+    let hooks = Hooks::default();
+    let (emu, ep) = up(hooks.clone()).await;
+    let http = client();
+
+    let r = http
+        .get(format!("{ep}/_kotatsu/terminate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 405);
+    assert_eq!(emu.state(), DevState::Running);
+    assert!(!hooks.calls.lock().contains(&"terminate".to_string()));
+
+    let r = authed(&http, &format!("{ep}/_kotatsu/other"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(b["path"], "/_kotatsu/other");
 }

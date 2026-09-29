@@ -1,12 +1,11 @@
 [package]
 name = "kotatsu"
 description = "Sandbox fleet control plane and session gateway core for AWS Lambda MicroVMs"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords = ["aws", "lambda", "microvm", "firecracker", "sandbox"]
 categories = ["network-programming", "api-bindings", "virtualization"]
 
@@ -25,6 +24,7 @@ parking_lot.workspace = true
 reqwest.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
+rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -33,9 +33,10 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 tokio-rusqlite.workspace = true
+tracing-subscriber.workspace = true

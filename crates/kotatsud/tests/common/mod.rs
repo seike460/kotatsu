@@ -2,14 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
 use kotatsu::ControlPlane;
 use kotatsu::{MemoryStore, PoolConfig, RunRequest, SandboxPool, WaitPolicy};
 use kotatsud::gateway::{self, AppState};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 /// Pool config for tests: no warm target, insecure endpoints allowed,
 /// fast wait policy.
@@ -27,21 +27,38 @@ pub fn pool_config() -> PoolConfig {
     cfg
 }
 
-/// Gateway router over a `MemoryStore` pool on `cp`, with the given
-/// `key → allowed tenants` map.
+/// The process-wide Prometheus recorder, installed once as kotatsud
+/// does, so `/metrics` renders what the gateway and pool record.
+fn prometheus() -> PrometheusHandle {
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| PrometheusBuilder::new().install_recorder().unwrap())
+        .clone()
+}
+
+/// Gateway state over a `MemoryStore` pool built from `cfg` on `cp`,
+/// with the given `key → allowed tenants` map.
+pub fn gateway_state(
+    cp: Arc<dyn ControlPlane>,
+    api_keys: HashMap<String, Option<HashSet<String>>>,
+    cfg: PoolConfig,
+) -> AppState {
+    let pool = Arc::new(SandboxPool::new(cp, Arc::new(MemoryStore::new()), cfg).unwrap());
+    AppState {
+        pool,
+        metrics: prometheus(),
+        api_keys,
+        allow_unauthenticated: false,
+        forwarded_proto: "http".into(),
+    }
+}
+
+/// Gateway router over [`gateway_state`] with [`pool_config`].
 pub fn gateway_router(
     cp: Arc<dyn ControlPlane>,
     api_keys: HashMap<String, Option<HashSet<String>>>,
 ) -> Router {
-    let pool = Arc::new(SandboxPool::new(cp, Arc::new(MemoryStore::new()), pool_config()).unwrap());
-    let prom = PrometheusBuilder::new().build_recorder();
-    gateway::router(AppState {
-        pool,
-        metrics: prom.handle(),
-        api_keys,
-        allow_unauthenticated: false,
-        forwarded_proto: "http".into(),
-    })
+    gateway::router(gateway_state(cp, api_keys, pool_config()))
 }
 
 /// Spawns `app` on an ephemeral loopback port; returns its address.

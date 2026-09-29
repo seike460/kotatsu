@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Runs the build jobs on any ref without publishing, to try a change
+  # to this workflow before tagging.
+  workflow_dispatch:
 
 # Default to read-only; the publish job declares `contents: write` on
 # itself so a compromised build step cannot touch the release.
@@ -14,29 +17,68 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux builds link against glibc 2.28 (cargo-zigbuild), not the
+          # runner's, so they run on Amazon Linux 2023, Debian 10+, etc.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            glibc: "2.28"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            glibc: "2.28"
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1 (master HEAD — synthetic toolchain refs are GC'd)
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: check the tag against the crate versions
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          for pkg in kotatsu-cli kotatsud; do
+            version=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$pkg" '.packages[] | select(.name == $pkg) | .version')
+            if [ "$version" != "${GITHUB_REF_NAME#v}" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match $pkg $version"
+              exit 1
+            fi
+          done
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo build --release --locked -p kotatsud -p kotatsu-cli --target ${{ matrix.target }}
+      - run: cargo test --workspace --locked
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.glibc
+        with:
+          version: 0.16.0
+          use-cache: false
+      - if: matrix.glibc
+        run: |
+          cargo install --locked cargo-zigbuild --version 0.23.4
+          cargo zigbuild --release --locked -p kotatsud -p kotatsu-cli --target ${{ matrix.target }}.${{ matrix.glibc }}
+      - if: ${{ !matrix.glibc }}
+        run: cargo build --release --locked -p kotatsud -p kotatsu-cli --target ${{ matrix.target }}
+      - name: check the glibc floor
+        if: matrix.glibc
+        run: |
+          for bin in kotatsu kotatsud; do
+            path=target/${{ matrix.target }}/release/$bin
+            needed=$(readelf --version-info --wide "$path" | grep -Eo 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/^GLIBC_//' | sort -uV | tail -n1)
+            if [ "$(printf '%s\n' "$needed" "${{ matrix.glibc }}" | sort -V | tail -n1)" != "${{ matrix.glibc }}" ]; then
+              echo "::error::$bin needs glibc $needed, above ${{ matrix.glibc }}"
+              exit 1
+            fi
+            "$path" --version
+          done
       - name: package
         shell: bash
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
-          tar czf "$OLDPWD/dist/kotatsu-${{ matrix.target }}.tar.gz" kotatsu kotatsud
+          tar czf "$OLDPWD/dist/kotatsu-${{ matrix.target }}.tar.gz" kotatsu kotatsud -C "$OLDPWD" LICENSE-MIT LICENSE-APACHE README.md
           cd "$OLDPWD/dist"
-          if command -v sha256sum >/dev/null; then sha256sum *.tar.gz; else shasum -a 256 *.tar.gz; fi > checksums-${{ matrix.target }}.sha256
+          if command -v sha256sum >/dev/null; then sha256sum -- *.tar.gz; else shasum -a 256 -- *.tar.gz; fi > checksums-${{ matrix.target }}.sha256
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kotatsu-${{ matrix.target }}
@@ -45,6 +87,8 @@ jobs:
 
   publish:
     needs: build
+    # A manual run on a tag ref must not publish either.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -59,3 +103,4 @@ jobs:
             *.tar.gz
             checksums-*.sha256
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

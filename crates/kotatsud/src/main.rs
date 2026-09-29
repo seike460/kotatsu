@@ -1,11 +1,13 @@
 //! kotatsud — session gateway daemon for AWS Lambda MicroVM sandboxes.
 //!
-//! One public HTTPS endpoint in front of N MicroVMs: it authenticates
+//! One plain-HTTP endpoint in front of N MicroVMs: it authenticates
 //! clients (Bearer API key), resolves tenant→MicroVM affinity through
 //! `SandboxPool`, holds requests while a suspended VM resumes, injects
 //! `X-aws-proxy-auth`/`X-aws-proxy-port`, and proxies HTTP and WebSocket
-//! traffic. `/metrics` exposes the pool/gateway Prometheus series —
-//! it shares the `--listen` socket unauthenticated; bind privately.
+//! traffic. It does not terminate TLS — on a public bind, put a
+//! TLS-terminating load balancer before it. `/metrics` exposes the
+//! pool/gateway Prometheus series — it shares the `--listen` socket
+//! unauthenticated; bind privately.
 //!
 //! `--mock` needs `--mock-endpoint` (e.g. a kotatsu-dev emulator or any
 //! local upstream) for proxied requests to reach a real socket.
@@ -30,7 +32,7 @@ struct Cli {
     #[arg(long, env = "KOTATSU_CONFIG")]
     config: Option<PathBuf>,
 
-    /// Listen address for the gateway.
+    /// Listen address for the gateway [default: 127.0.0.1:3000].
     #[arg(long, env = "KOTATSU_LISTEN")]
     listen: Option<SocketAddr>,
 
@@ -42,11 +44,11 @@ struct Cli {
     #[arg(long, env = "KOTATSU_IMAGE")]
     image: Option<String>,
 
-    /// Application port inside each MicroVM.
+    /// Application port inside each MicroVM [default: 8080].
     #[arg(long, env = "KOTATSU_APP_PORT")]
     app_port: Option<u16>,
 
-    /// Unassigned warm VMs kept ready.
+    /// Unassigned warm VMs kept ready [default: 4].
     #[arg(long, env = "KOTATSU_WARM_SIZE")]
     warm_size: Option<usize>,
 
@@ -56,29 +58,31 @@ struct Cli {
     #[arg(long, env = "KOTATSU_WARM_SCHEDULE", value_parser = parse_warm_window, value_delimiter = ',')]
     warm_schedule: Vec<kotatsu::WarmWindow>,
 
-    /// Hard cap on pool-managed VMs.
+    /// Hard cap on pool-managed VMs [default: 100].
     #[arg(long, env = "KOTATSU_MAX_VMS")]
     max_vms: Option<usize>,
 
-    /// Terminate VMs older than this (seconds; 0 = disable).
+    /// Terminate VMs older than this (seconds; 0 = disable) [default: 0].
     #[arg(long, env = "KOTATSU_MAX_AGE_SECS")]
     max_age_secs: Option<u64>,
 
-    /// Suspend a VM after this many idle seconds (0 = rely on the
-    /// image's own idle policy).
+    /// Suspend a VM after this many idle seconds (60-28800; 0 = off: VMs
+    /// run without an idle policy and are not auto-suspended) [default: 0].
     #[arg(long, env = "KOTATSU_IDLE_SUSPEND_SECS")]
     idle_suspend_secs: Option<u64>,
 
-    /// Terminate a suspended VM after this many seconds (max 28800).
+    /// Terminate a suspended VM after this many seconds (max 28800)
+    /// [default: 28800].
     #[arg(long, env = "KOTATSU_SUSPENDED_TTL_SECS")]
     suspended_ttl_secs: Option<u64>,
 
-    /// Max seconds a request waits for a suspended VM to resume.
+    /// Max seconds a request waits for a suspended VM to resume
+    /// [default: 120].
     #[arg(long, env = "KOTATSU_WAIT_TIMEOUT_SECS")]
     wait_timeout_secs: Option<u64>,
 
     /// Value for `x-forwarded-proto` upstream (set `https` behind a
-    /// TLS-terminating load balancer).
+    /// TLS-terminating load balancer) [default: http].
     #[arg(long, env = "KOTATSU_FORWARDED_PROTO")]
     forwarded_proto: Option<String>,
 
@@ -87,7 +91,7 @@ struct Cli {
     #[arg(long, env = "KOTATSU_MOCK_ENDPOINT", requires = "mock")]
     mock_endpoint: Option<String>,
 
-    /// Maintenance tick in seconds.
+    /// Maintenance tick in seconds [default: 60].
     #[arg(long, env = "KOTATSU_MAINTENANCE_SECS")]
     maintenance_secs: Option<u64>,
 
@@ -95,27 +99,31 @@ struct Cli {
     /// nowhere — the restart-recovery reconcile. Only safe when the
     /// image is dedicated to this pool: an externally-launched VM of
     /// the same image/version is treated as lost and terminated.
+    /// Requires `--image` to be the image ARN, not an image ID.
     /// `--reap-lost-vms=false` (or `KOTATSU_REAP_LOST_VMS=false`)
     /// explicitly disables it, overriding a config-file `true`.
     #[arg(long, env = "KOTATSU_REAP_LOST_VMS", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     reap_lost_vms: Option<bool>,
 
     /// SQLite file for tenant bindings. Default:
-    /// `$XDG_DATA_HOME/kotatsu/bindings.db` (or `~/.local/share/…`).
-    /// In-memory state orphans running VMs on restart (bills to 8h).
+    /// `$XDG_DATA_HOME/kotatsu/bindings.db` (or `~/.local/share/…`);
+    /// with `--mock`, in memory. In-memory state orphans running VMs on
+    /// restart (bills to 8h).
     #[arg(long, env = "KOTATSU_STATE_DB")]
     state_db: Option<PathBuf>,
 
     /// Client API keys (repeat or comma-separate via env).
     /// Clients pass `Authorization: Bearer <key>` (or `?key=` for
     /// browser WebSockets). Global keys reach every tenant — prefer
-    /// --tenant-key for untrusted callers.
+    /// --tenant-key for untrusted callers. Prefer the env var or
+    /// --config: other local users can read command-line arguments.
     #[arg(long = "api-key", env = "KOTATSU_API_KEYS", value_delimiter = ',')]
     api_keys: Vec<String>,
 
     /// Tenant-scoped API key: `TENANT=KEY` (repeatable). The key only
     /// authorizes requests under `/t/{TENANT}` — a leaked scoped key
-    /// cannot pivot to other tenants.
+    /// cannot pivot to other tenants. Prefer the env var or --config:
+    /// other local users can read command-line arguments.
     #[arg(
         long = "tenant-key",
         env = "KOTATSU_TENANT_KEYS",
@@ -124,8 +132,11 @@ struct Cli {
     tenant_keys: Vec<String>,
 
     /// Allow unauthenticated clients (local development only).
-    #[arg(long, env = "KOTATSU_ALLOW_UNAUTHENTICATED")]
-    allow_unauthenticated: bool,
+    /// `--allow-unauthenticated=false` (or
+    /// `KOTATSU_ALLOW_UNAUTHENTICATED=false`) overrides a config-file
+    /// `true`.
+    #[arg(long, env = "KOTATSU_ALLOW_UNAUTHENTICATED", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    allow_unauthenticated: Option<bool>,
 
     /// Use the mock control plane — no AWS calls, for local testing.
     #[arg(long, env = "KOTATSU_MOCK")]
@@ -159,12 +170,43 @@ struct FileConfig {
     maintenance_interval: Option<Duration>,
     reap_lost_vms: Option<bool>,
     state_db: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "secret_list")]
     api_keys: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "secret_list")]
     tenant_keys: Vec<String>,
     #[serde(default)]
     allow_unauthenticated: bool,
+}
+
+/// An array of secrets. serde's type errors quote the rejected value
+/// (`invalid type: string "…"`), so they are replaced.
+fn secret_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    <Vec<String> as serde::Deserialize>::deserialize(d)
+        .map_err(|_| serde::de::Error::custom("expected an array of strings"))
+}
+
+/// Reads the `--config` file. Errors name the path and position but
+/// never quote the file: it holds API keys, and startup errors end up
+/// in collected logs.
+fn load_config(path: &std::path::Path) -> anyhow::Result<FileConfig> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read config {}: {e}", path.display()))?;
+    parse_config(&text).map_err(|e| anyhow::anyhow!("invalid config {}: {e}", path.display()))
+}
+
+/// Parses the config text. The error is the parser's message and its
+/// position; `toml::de::Error`'s `Display` would quote the whole line.
+fn parse_config(text: &str) -> Result<FileConfig, String> {
+    toml::from_str(text).map_err(|e: toml::de::Error| {
+        let msg = e.message().trim_end().replace('\n', "; ");
+        let Some(before) = e.span().and_then(|s| text.get(..s.start)) else {
+            return msg;
+        };
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let line = before.matches('\n').count() + 1;
+        let column = before[line_start..].chars().count() + 1;
+        format!("line {line}, column {column}: {msg}")
+    })
 }
 
 #[tokio::main]
@@ -172,13 +214,13 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kotatsud=info,kotatsu=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "kotatsud=info,kotatsu=info".into()),
         )
         .init();
 
     let cli = Cli::parse();
     let file: FileConfig = match &cli.config {
-        Some(p) => toml::from_str(&std::fs::read_to_string(p)?)?,
+        Some(p) => load_config(p)?,
         None => FileConfig::default(),
     };
 
@@ -226,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // -- state store ----------------------------------------------------
-    let store: Arc<dyn StateStore> = match cfg.state_db.clone().or_else(default_state_db) {
+    let store: Arc<dyn StateStore> = match cfg.state_db_path() {
         Some(path) => {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| {
@@ -239,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(path = %path.display(), "persistent bindings (SQLite)");
             Arc::new(kotatsu::SqliteStore::open(&path).await?)
         }
+        None if cfg.mock => Arc::new(MemoryStore::new()),
         None => {
             tracing::warn!("in-memory bindings: a restart orphans running VMs — set --state-db");
             Arc::new(MemoryStore::new())
@@ -280,9 +323,7 @@ async fn main() -> anyhow::Result<()> {
     pool_cfg.maintenance_interval = cfg.maintenance_interval;
     pool_cfg.reap_lost_vms = cfg.reap_lost_vms;
     // `http://` endpoints only when a mock endpoint override says so.
-    if cli.mock_endpoint.is_some() {
-        pool_cfg.allow_insecure_endpoints = mock_endpoint_is_http;
-    }
+    pool_cfg.allow_insecure_endpoints = mock_endpoint_is_http;
     let pool = Arc::new(kotatsu::SandboxPool::new(cp, store, pool_cfg)?);
 
     let _maintenance = pool.spawn_maintenance();
@@ -321,13 +362,50 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
-    axum::serve(
+    serve_until(listener, app, shutdown_signal(), SHUTDOWN_GRACE).await?;
+    Ok(())
+}
+
+/// How long open connections get to finish after SIGTERM/SIGINT — less
+/// than the 30 s that Kubernetes and ECS wait before SIGKILL.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
+
+/// Serves `app` until `signal`, then stops accepting connections and
+/// gives open ones `grace` to finish before dropping them. A response
+/// streamed from a VM (SSE, a long download) may never end, and axum's
+/// graceful shutdown alone would wait for it forever.
+async fn serve_until(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    signal: impl Future<Output = ()> + Send + 'static,
+    grace: Duration,
+) -> std::io::Result<()> {
+    let (stopping_tx, stopping) = tokio::sync::oneshot::channel();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
-    Ok(())
+    .with_graceful_shutdown(async move {
+        signal.await;
+        let _ = stopping_tx.send(());
+    });
+    let expired = async {
+        if stopping.await.is_ok() {
+            tokio::time::sleep(grace).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        res = server.into_future() => res,
+        () = expired => {
+            tracing::warn!(
+                ?grace,
+                "connections still open after the shutdown grace period — closing them"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Builds the gateway's key map: `key → Option<allowed tenants>`
@@ -474,7 +552,10 @@ impl Resolved {
                 .unwrap_or_else(|| "127.0.0.1:3000".parse().unwrap()),
             region: cli.region.clone().or_else(|| file.region.clone()),
             image: cli.image.clone().or_else(|| file.image.clone()),
-            app_port: cli.app_port.or(file.app_port).unwrap_or(8080),
+            app_port: cli
+                .app_port
+                .or(file.app_port)
+                .unwrap_or(kotatsu::DEFAULT_APP_PORT),
             warm_size: cli.warm_size.or(file.warm_size).unwrap_or(4),
             warm_schedule: if !cli.warm_schedule.is_empty() {
                 cli.warm_schedule.clone()
@@ -518,9 +599,23 @@ impl Resolved {
                     .collect::<Result<_, _>>()
                     .map_err(anyhow::Error::msg)?
             },
-            allow_unauthenticated: cli.allow_unauthenticated || file.allow_unauthenticated,
+            allow_unauthenticated: cli
+                .allow_unauthenticated
+                .unwrap_or(file.allow_unauthenticated),
             mock: cli.mock,
         })
+    }
+
+    /// The SQLite file for bindings, `None` for in-memory state. Mock
+    /// mode never falls back to the default file: the mock control
+    /// plane reports every real MicroVM as gone, so its maintenance
+    /// would release the bindings of a real deployment sharing it.
+    fn state_db_path(&self) -> Option<PathBuf> {
+        match &self.state_db {
+            Some(path) => Some(path.clone()),
+            None if self.mock => None,
+            None => default_state_db(),
+        }
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -568,6 +663,17 @@ impl Resolved {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parses `args` alone: `KOTATSU_*` and `AWS_REGION` in the
+    /// environment running the tests must not change the result.
+    fn parse_cli(args: &[&str]) -> Cli {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = Cli::command()
+            .mut_args(|a| a.env(None::<&'static str>))
+            .try_get_matches_from(args)
+            .unwrap();
+        Cli::from_arg_matches(&matches).unwrap()
+    }
 
     #[test]
     fn warm_window_parses_hhmm_range() {
@@ -628,13 +734,12 @@ mod tests {
 
     #[test]
     fn reap_lost_vms_tri_state_resolution() {
-        use clap::Parser;
         // Bare flag → Some(true); explicit false is expressible; unset → None.
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms"]);
         assert_eq!(cli.reap_lost_vms, Some(true));
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms=false"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms=false"]);
         assert_eq!(cli.reap_lost_vms, Some(false));
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert_eq!(cli.reap_lost_vms, None);
 
         // CLI > file: an explicit false retracts a config-file true —
@@ -643,17 +748,141 @@ mod tests {
             reap_lost_vms: Some(true),
             ..Default::default()
         };
-        let cli = Cli::try_parse_from(["kotatsud", "--reap-lost-vms=false"]).unwrap();
+        let cli = parse_cli(&["kotatsud", "--reap-lost-vms=false"]);
         assert!(!Resolved::resolve(&cli, &file_true).unwrap().reap_lost_vms);
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert!(Resolved::resolve(&cli, &file_true).unwrap().reap_lost_vms);
         // Default when nothing sets it stays off.
-        let cli = Cli::try_parse_from(["kotatsud"]).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
         assert!(
             !Resolved::resolve(&cli, &FileConfig::default())
                 .unwrap()
                 .reap_lost_vms
         );
+    }
+
+    #[test]
+    fn allow_unauthenticated_flag_overrides_the_file() {
+        let allow = |args: &[&str], file: bool| {
+            let file = FileConfig {
+                allow_unauthenticated: file,
+                ..Default::default()
+            };
+            Resolved::resolve(&parse_cli(args), &file)
+                .unwrap()
+                .allow_unauthenticated
+        };
+        assert!(!allow(&["kotatsud", "--allow-unauthenticated=false"], true));
+        assert!(allow(&["kotatsud"], true));
+        assert!(allow(&["kotatsud", "--allow-unauthenticated"], false));
+        assert!(!allow(&["kotatsud"], false));
+    }
+
+    #[test]
+    fn help_states_the_defaults() {
+        use clap::CommandFactory;
+        let cfg = Resolved::resolve(&parse_cli(&["kotatsud"]), &FileConfig::default()).unwrap();
+        let secs = |d: Option<Duration>| d.map_or(0, |d| d.as_secs()).to_string();
+        let cmd = Cli::command();
+        for (id, default) in [
+            ("listen", cfg.listen.to_string()),
+            ("app_port", cfg.app_port.to_string()),
+            ("warm_size", cfg.warm_size.to_string()),
+            ("max_vms", cfg.max_vms.to_string()),
+            ("max_age_secs", secs(cfg.max_age)),
+            ("idle_suspend_secs", secs(cfg.idle_suspend)),
+            (
+                "suspended_ttl_secs",
+                kotatsu::MAX_DURATION_SECONDS.to_string(),
+            ),
+            (
+                "wait_timeout_secs",
+                kotatsu::WaitPolicy::default().timeout.as_secs().to_string(),
+            ),
+            ("forwarded_proto", cfg.forwarded_proto.clone()),
+            ("maintenance_secs", secs(Some(cfg.maintenance_interval))),
+        ] {
+            let arg = cmd.get_arguments().find(|a| a.get_id() == id).unwrap();
+            let help = arg.get_help().unwrap().to_string();
+            assert!(
+                help.contains(&format!("[default: {default}]")),
+                "{id}: {help}"
+            );
+        }
+        // Unset, these two fall back to the values checked above.
+        assert_eq!(cfg.suspended_ttl, None);
+        assert_eq!(cfg.wait_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_streams_after_the_grace_period() {
+        let app = axum::Router::new().route(
+            "/stream",
+            axum::routing::get(|| async {
+                axum::body::Body::from_stream(futures_util::stream::pending::<
+                    Result<Vec<u8>, std::io::Error>,
+                >())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_until(
+            listener,
+            app,
+            async {
+                let _ = stopped.await;
+            },
+            Duration::from_millis(100),
+        ));
+        let resp = reqwest::get(format!("http://{addr}/stream")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("shutdown waited for the open stream")
+            .unwrap()
+            .unwrap();
+        drop(resp);
+    }
+
+    #[test]
+    fn mock_mode_never_defaults_to_the_bindings_file() {
+        // The mock control plane reports real VMs as gone, so sharing
+        // the default file would drop a real deployment's bindings.
+        let state_db = |args: &[&str]| {
+            let cli = parse_cli(args);
+            Resolved::resolve(&cli, &FileConfig::default())
+                .unwrap()
+                .state_db_path()
+        };
+        assert_eq!(state_db(&["kotatsud", "--mock"]), None);
+        assert_eq!(state_db(&["kotatsud"]), default_state_db());
+        // An explicit path still wins in mock mode.
+        assert_eq!(
+            state_db(&["kotatsud", "--mock", "--state-db", "mock.db"]),
+            Some(PathBuf::from("mock.db"))
+        );
+    }
+
+    #[test]
+    fn readme_config_example_is_accepted() {
+        // Unknown keys fail startup, so a renamed field must not leave
+        // the documented example behind.
+        let toml = include_str!("../README.md")
+            .split("```toml\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("README has a toml block");
+        let file = parse_config(toml).unwrap();
+        let cli = parse_cli(&["kotatsud"]);
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.idle_suspend, Some(Duration::from_secs(300)));
+        assert_eq!(cfg.wait_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(cfg.warm_schedule.len(), 2);
+        assert_eq!(cfg.tenant_keys.len(), 1);
     }
 
     #[test]
@@ -664,6 +893,136 @@ mod tests {
             let err = parse_tenant_key(bad).unwrap_err();
             assert!(!err.contains("s3cret"), "key leaked in error: {err}");
         }
+    }
+
+    #[test]
+    fn config_file_values_resolve() {
+        let file = parse_config(
+            r#"
+            max_age = "1h"
+            maintenance_interval = "30s"
+            suspended_ttl = "0s"
+            reap_lost_vms = true
+            api_keys = [" k1 "]
+            tenant_keys = ["alice=k2"]
+            "#,
+        )
+        .unwrap();
+        let cli = parse_cli(&["kotatsud"]);
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
+        assert_eq!(cfg.maintenance_interval, Duration::from_secs(30));
+        assert_eq!(cfg.suspended_ttl, Some(Duration::ZERO));
+        assert!(cfg.reap_lost_vms);
+        assert_eq!(cfg.api_keys, ["k1"]);
+        assert_eq!(cfg.tenant_keys, [("alice".to_owned(), "k2".to_owned())]);
+
+        // A flag wins over the file, and `--api-key` replaces only the
+        // `api_keys` list.
+        let cli = parse_cli(&["kotatsud", "--api-key", "cli", "--maintenance-secs", "5"]);
+        let cfg = Resolved::resolve(&cli, &file).unwrap();
+        assert_eq!(cfg.api_keys, ["cli"]);
+        assert_eq!(cfg.tenant_keys.len(), 1);
+        assert_eq!(cfg.maintenance_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn config_file_rejects_bad_entries() {
+        let err = parse_config("warm_sise = 4").err().unwrap();
+        assert!(err.contains("unknown field `warm_sise`"), "{err}");
+        // Durations are strings; the flags take the whole seconds.
+        assert!(parse_config("max_age = 3600").is_err());
+        let cli = parse_cli(&["kotatsud"]);
+        for bad in [
+            r#"warm_schedule = ["9-18=2"]"#,
+            r#"tenant_keys = ["bad tenant=s3cret"]"#,
+        ] {
+            let file = parse_config(bad).unwrap();
+            let err = Resolved::resolve(&cli, &file).err().unwrap().to_string();
+            assert!(!err.contains("s3cret"), "{bad:?} leaked: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_each_invalid_setting() {
+        let valid = || {
+            let cli = parse_cli(&["kotatsud", "--image", "img", "--api-key", "k"]);
+            Resolved::resolve(&cli, &FileConfig::default()).unwrap()
+        };
+        assert!(valid().validate().is_ok());
+
+        type Change = fn(&mut Resolved);
+        let rejected: &[(&str, Change)] = &[
+            ("--image", |c| c.image = None),
+            ("no API keys", |c| c.api_keys.clear()),
+            ("empty API key", |c| c.api_keys.push(" ".into())),
+            ("--app-port", |c| c.app_port = 0),
+            ("--idle-suspend-secs", |c| {
+                c.idle_suspend = Some(Duration::from_secs(59));
+            }),
+            ("--idle-suspend-secs", |c| {
+                c.idle_suspend = Some(Duration::from_secs(28_801));
+            }),
+            ("--suspended-ttl-secs", |c| {
+                c.suspended_ttl = Some(Duration::from_secs(28_801));
+            }),
+        ];
+        for (i, (want, change)) in rejected.iter().enumerate() {
+            let mut cfg = valid();
+            change(&mut cfg);
+            let err = cfg.validate().err().unwrap().to_string();
+            assert!(err.contains(want), "case {i}: {err}");
+        }
+
+        let accepted: &[Change] = &[
+            |c| {
+                c.image = None;
+                c.mock = true;
+            },
+            |c| {
+                c.api_keys.clear();
+                c.tenant_keys.push(("alice".into(), "k".into()));
+            },
+            // 0 turns idle suspend off; 60 and 28800 are the bounds.
+            |c| c.idle_suspend = Some(Duration::ZERO),
+            |c| c.idle_suspend = Some(Duration::from_secs(60)),
+            |c| c.idle_suspend = Some(Duration::from_secs(28_800)),
+            |c| c.suspended_ttl = Some(Duration::ZERO),
+            |c| c.suspended_ttl = Some(Duration::from_secs(28_800)),
+        ];
+        for (i, change) in accepted.iter().enumerate() {
+            let mut cfg = valid();
+            change(&mut cfg);
+            assert!(cfg.validate().is_ok(), "case {i}");
+        }
+    }
+
+    #[test]
+    fn config_errors_never_quote_the_file() {
+        // The file holds API keys, and startup errors reach collected
+        // logs: an error gives the position, never the line or value.
+        for (bad, at) in [
+            // Misspelled key (unknown field).
+            ("api_key = \"s3cret\"", "line 1, column 1"),
+            // A single string where an array is expected.
+            ("api_keys = \"s3cret\"", "line 1, column 12"),
+            (
+                "listen = \"127.0.0.1:3000\"\ntenant_keys = \"alice=s3cret\"",
+                "line 2, column 15",
+            ),
+            // A non-string element.
+            ("api_keys = [\"s3cret\", 5]", "line 1, column 12"),
+            // Syntax error: unterminated string.
+            ("tenant_keys = [\"alice=s3cret]", "line 1, column"),
+        ] {
+            let err = parse_config(bad).err().unwrap();
+            assert!(!err.contains("s3cret"), "{bad:?} leaked: {err}");
+            assert!(err.starts_with(at), "{bad:?}: {err}");
+        }
+        let err = load_config(std::path::Path::new("/nonexistent/kotatsud.toml"))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("/nonexistent/kotatsud.toml"));
     }
 
     #[test]

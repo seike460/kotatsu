@@ -9,6 +9,10 @@ use kotatsu::{
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Pool image for tests that enable the lost-VM reconcile, which
+/// requires the image ARN (`PoolConfig::reap_lost_vms`).
+const IMG_ARN: &str = "arn:aws:lambda:us-east-1:123456789012:microvm-image:img";
+
 fn tenant(s: &str) -> TenantKey {
     TenantKey::new(s).unwrap()
 }
@@ -137,6 +141,30 @@ async fn maintain_warms_then_acquire_consumes() {
 }
 
 #[tokio::test]
+async fn spawned_maintenance_ticks_before_the_first_interval() {
+    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    cfg.warm_size = 2;
+    cfg.maintenance_interval = Duration::from_secs(3600);
+    let pool = Arc::new(
+        SandboxPool::new(
+            Arc::new(MockControlPlane::new()),
+            Arc::new(MemoryStore::new()),
+            cfg,
+        )
+        .unwrap(),
+    );
+    let task = pool.spawn_maintenance();
+    let warmed = tokio::time::timeout(Duration::from_secs(5), async {
+        while pool.stats().await.warm < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    task.abort();
+    assert!(warmed.is_ok(), "the warm set waited for the first interval");
+}
+
+#[tokio::test]
 async fn suspend_then_reacquire_resumes() {
     let cp = Arc::new(MockControlPlane::new());
     let pool = test_pool(cp.clone(), 0, 10);
@@ -163,7 +191,6 @@ async fn dead_binding_is_reaped_and_replaced() {
     // Without maintain, acquire self-heals through the binding path.
     let sb = pool.acquire(&tenant("u1")).await.unwrap();
     assert_ne!(sb.vm().id(), &old);
-    assert_ne!(sb.vm().id().as_str(), old.as_str());
 }
 
 #[tokio::test]
@@ -202,10 +229,8 @@ async fn max_age_reaps_bound_vms() {
     let id = sb.vm().id().clone();
     drop(sb);
 
-    // Backdate the VM's start beyond max_age by lying about its age —
-    // the mock reports `started_at_secs = now`, so simulate by
-    // terminating… no: instead assert the sweep terminates it once aged.
-    // With max_age=1s a fresh VM is NOT reaped.
+    // The mock reports `started_at_secs = now`, so with max_age=1s the
+    // fresh VM is NOT reaped…
     let report = pool.maintain().await.unwrap();
     assert_eq!(report.reaped, 0);
     assert!(cp.get(&id).await.unwrap().is_live());
@@ -294,6 +319,8 @@ async fn warm_schedule_scales_down_between_ticks() {
 
 #[tokio::test]
 async fn shrink_failure_restores_vm_to_warm() {
+    // Seed warm VMs via a schedule that first wants 2, then 0 — the
+    // failing-terminate tick must push the VM back, not leak it.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
             terminate_error: Some("boom".into()),
@@ -301,57 +328,30 @@ async fn shrink_failure_restores_vm_to_warm() {
         },
     ));
     let mut cfg = PoolConfig::new(RunRequest::new("img"));
-    cfg.warm_size = 2;
+    cfg.warm_size = 0;
     cfg.max_vms = 10;
-    // All-day window drops the target to 0 — but terminate keeps failing.
-    cfg.warm_schedule = vec![WarmWindow::new(0, 1440, 0).unwrap()];
+    cfg.warm_schedule = vec![
+        WarmWindow::new(60, 120, 2).unwrap(),
+        WarmWindow::new(180, 240, 0).unwrap(),
+    ];
     cfg.wait = WaitPolicy {
         timeout: Duration::from_secs(5),
         initial_delay: Duration::from_millis(10),
         max_delay: Duration::from_millis(50),
     };
     let pool = SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), cfg).unwrap();
-
-    // warm_size=2 wins *before* any tick because shrink happens in
-    // maintain — but the launch loop uses the scheduled target, so
-    // warm VMs are only created via warm_size... verify the sequence:
-    let report = pool.maintain_at(3600).await.unwrap();
-    assert_eq!(report.warmed, 0, "scheduled target 0 should not warm");
-    assert_eq!(report.shrunk, 0, "terminates all fail");
-
-    // Seed warm VMs via a schedule that first wants 2, then 0 — the
-    // failing-terminate tick must push the VM back, not leak it.
-    let cp2 = Arc::new(MockControlPlane::with_behavior(
-        kotatsu::mock::MockBehavior {
-            terminate_error: Some("boom".into()),
-            ..Default::default()
-        },
-    ));
-    let mut cfg2 = PoolConfig::new(RunRequest::new("img"));
-    cfg2.warm_size = 0;
-    cfg2.max_vms = 10;
-    cfg2.warm_schedule = vec![
-        WarmWindow::new(60, 120, 2).unwrap(),
-        WarmWindow::new(180, 240, 0).unwrap(),
-    ];
-    cfg2.wait = WaitPolicy {
-        timeout: Duration::from_secs(5),
-        initial_delay: Duration::from_millis(10),
-        max_delay: Duration::from_millis(50),
-    };
-    let pool2 = SandboxPool::new(cp2.clone(), Arc::new(MemoryStore::new()), cfg2).unwrap();
-    let report = pool2.maintain_at(90 * 60).await.unwrap();
+    let report = pool.maintain_at(90 * 60).await.unwrap();
     assert_eq!(report.warmed, 2);
 
-    let report = pool2.maintain_at(210 * 60).await.unwrap();
+    let report = pool.maintain_at(210 * 60).await.unwrap();
     assert_eq!(report.shrunk, 0);
     // Both VMs return to warm; inflight is fully released (no leak).
-    let stats = pool2.stats().await;
+    let stats = pool.stats().await;
     assert_eq!(stats.warm, 2);
     assert_eq!(stats.inflight, 0);
     // And the VMs are still live — terminate never landed.
     assert!(
-        cp2.list(None, None)
+        cp.list(None, None)
             .await
             .unwrap()
             .iter()
@@ -459,6 +459,36 @@ async fn release_keeps_binding_when_terminate_fails() {
     assert!(sb.release().await.is_err());
     assert!(store.get(&tenant("u1")).await.unwrap().is_some());
     assert_eq!(cp.get(&id).await.unwrap().state, State::Running);
+}
+
+#[tokio::test]
+async fn drain_release_failure_is_best_effort() {
+    // The VM is terminated but its binding release fails: drain still
+    // returns Ok, and the binding left pointing at the dead VM is
+    // dropped by the next maintain.
+    let cp = Arc::new(MockControlPlane::new());
+    let store = Arc::new(FlakyStore::new());
+    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    cfg.warm_size = 0;
+    cfg.max_vms = 10;
+    let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
+    let sb = pool.acquire(&tenant("u1")).await.unwrap();
+    let id = sb.vm().id().clone();
+    drop(sb);
+
+    store
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    pool.drain().await.unwrap();
+    assert_eq!(cp.get(&id).await.unwrap().state, State::Terminated);
+    assert!(store.get(&tenant("u1")).await.unwrap().is_some());
+
+    store
+        .fail_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let report = pool.maintain().await.unwrap();
+    assert_eq!(report.bindings_dropped, 1);
+    assert!(store.get(&tenant("u1")).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1000,13 +1030,14 @@ async fn bound_vm_surviving_failed_release_stays_tracked() {
     // `store.release` fails but the binding survives, and `terminate`
     // also fails: the VM must remain bound and tracked — never warm,
     // never dropped.
-    let cp = Arc::new(MockControlPlane::with_behavior(
+    let cp = Arc::new(FlakyControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
             boot_time: Duration::from_secs(3600), // wait fails → cleanup
-            terminate_error: Some("boom".into()),
             ..Default::default()
         },
     ));
+    cp.fail_terminate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let store = Arc::new(FlakyStore::new());
     store
         .fail_release
@@ -1023,10 +1054,20 @@ async fn bound_vm_surviving_failed_release_stays_tracked() {
 
     let t1 = tenant("u1");
     assert!(pool.acquire(&t1).await.is_err());
+    // The cleanup runs detached; its failed terminate is its last step.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cp.terminate_calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("cleanup never tried to terminate the bound VM");
     let bound = store.get(&t1).await.unwrap().unwrap();
     let stats = pool.stats().await;
     assert_eq!(stats.warm, 0, "a bound VM must never be warm");
+    assert_eq!(stats.inflight, 0);
     assert_eq!(stats.assigned, 1, "the binding still tracks the VM");
+    assert_eq!(stats.lost, 0);
     assert_eq!(
         cp.get(&bound.microvm_id).await.unwrap().state,
         State::Pending,
@@ -1460,7 +1501,7 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
         store
             .get_ok_budget
             .store(1, std::sync::atomic::Ordering::SeqCst);
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
@@ -1491,7 +1532,7 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
         );
         assert!(cp.get(&vm_id).await.unwrap().is_live());
 
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         cfg.reap_lost_vms = true; // the reconcile this test exercises
@@ -1536,13 +1577,14 @@ fn unpinned_lost_vm_is_destroyed_after_restart() {
 }
 
 #[tokio::test]
-async fn pending_release_frees_capacity_for_other_tenants() {
-    // While a cleanup's release is still pending, the VM is counted
-    // once — via its binding — not as binding+inflight. At
-    // `max_vms=2` another tenant must still get the free slot.
+async fn reserve_waits_for_pending_release_then_succeeds() {
+    // While a cleanup's release is parked, the VM is counted once —
+    // its binding and the cleanup's inflight slot overlap. Another
+    // tenant's reserve waits out the release under the capacity lock,
+    // then gets the free slot at `max_vms=2`.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
-            boot_time: Duration::from_millis(50),
+            boot_time: Duration::from_millis(500),
             ..Default::default()
         },
     ));
@@ -1578,6 +1620,12 @@ async fn pending_release_frees_capacity_for_other_tenants() {
     task.abort();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(store.get(&t1).await.unwrap().is_some());
+    let stats = pool.stats().await;
+    assert_eq!(
+        stats.warm + stats.inflight + stats.assigned + stats.lost,
+        1,
+        "the parked VM must be counted once"
+    );
 
     // managed = warm(0) + inflight(0) + assigned(1) < max_vms(2) — but
     // the capacity lock serializes the binding→inflight handoff, so
@@ -1714,7 +1762,7 @@ async fn cancelled_release_never_shares_vm_with_other_tenant() {
     // the next `maintain` tick.
     let cp = Arc::new(MockControlPlane::with_behavior(
         kotatsu::mock::MockBehavior {
-            boot_time: Duration::from_millis(50),
+            boot_time: Duration::from_millis(500),
             ..Default::default()
         },
     ));
@@ -1774,8 +1822,8 @@ async fn dead_vm_not_rewarmed_after_wait_failure() {
         },
     ));
     let pool = Arc::new(test_pool(cp.clone(), 0, 10));
-    // Give the acquire a short wait budget so it fails fast.
-    // (test_pool already sets a 5s timeout with 10-50ms backoff.)
+    // The VM never boots; terminating it mid-wait fails the wait at
+    // once instead of spending test_pool's 5s budget.
     let acq = tokio::spawn({
         let pool = pool.clone();
         async move { pool.acquire(&tenant("u1")).await }
@@ -1812,6 +1860,21 @@ async fn invalid_pool_config_rejected() {
     assert!(SandboxPool::new(cp, Arc::new(MemoryStore::new()), cfg).is_err());
 }
 
+#[test]
+fn reap_lost_vms_requires_image_arn() {
+    // list-microvms reports image ARNs: with an image ID the reconcile
+    // would silently match nothing, so the pool refuses to start.
+    let cp: Arc<dyn ControlPlane> = Arc::new(MockControlPlane::new());
+    let pool = |image: &str, reap: bool| {
+        let mut cfg = PoolConfig::new(RunRequest::new(image));
+        cfg.reap_lost_vms = reap;
+        SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), cfg)
+    };
+    assert!(matches!(pool("img", true), Err(Error::InvalidInput(_))));
+    assert!(pool(IMG_ARN, true).is_ok());
+    assert!(pool("img", false).is_ok());
+}
+
 #[tokio::test]
 async fn reap_lost_vms_disabled_keeps_foreign_vm() {
     // `PoolConfig::new` must default `reap_lost_vms` off: an
@@ -1841,13 +1904,95 @@ async fn reap_lost_vms_disabled_keeps_foreign_vm() {
     assert_eq!(terminates(), 0, "no terminate may be issued at all");
 }
 
+/// Collects formatted `tracing` output for assertions.
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+#[tokio::test]
+async fn lost_vm_marker_release_failure_is_logged_and_retried() {
+    // The lost VM is terminated but its sentinel marker can't be
+    // released: the failure is logged, and the marker left behind is
+    // cleared by the next maintain once the store recovers.
+    let logs = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let cp = Arc::new(FlakyControlPlane::new());
+    let store = Arc::new(FlakyStore::new());
+    let pool = SandboxPool::new(cp.clone(), store.clone(), {
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
+        cfg.warm_size = 0;
+        cfg.max_vms = 10;
+        cfg.reap_lost_vms = true;
+        cfg
+    })
+    .unwrap();
+    let lost = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
+    pool.maintain().await.unwrap(); // first sighting: suspect only
+
+    store
+        .fail_release
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = pool.maintain().await.unwrap();
+    assert_eq!(report.reaped, 1);
+    assert_eq!(cp.get(&lost.id).await.unwrap().state, State::Terminated);
+    assert!(
+        logs.text().contains("sentinel marker release failed"),
+        "the failed release must be logged: {}",
+        logs.text()
+    );
+    assert!(
+        store
+            .list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.sentinel && b.microvm_id == lost.id),
+        "the marker stays for the retry"
+    );
+
+    store
+        .fail_release
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    pool.maintain().await.unwrap();
+    assert!(
+        !store.list().await.unwrap().iter().any(|b| b.sentinel),
+        "the next maintain clears the marker of the dead VM"
+    );
+}
+
 #[tokio::test]
 async fn untracked_foreign_image_vm_survives_reconcile() {
     // Even with the reconcile enabled, image scoping holds: a live VM
     // whose image is NOT this pool's is never a lost fleet member.
     let cp = Arc::new(FlakyControlPlane::new());
     let pool = SandboxPool::new(cp.clone(), Arc::new(MemoryStore::new()), {
-        let mut cfg = PoolConfig::new(RunRequest::new("img"));
+        let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
         cfg.warm_size = 0;
         cfg.max_vms = 10;
         cfg.reap_lost_vms = true;
@@ -1879,7 +2024,7 @@ async fn wait_fail_cleanup_vm_survives_maintain_ticks() {
         },
     ));
     let store = Arc::new(FlakyStore::new());
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON to prove pending protects
@@ -2532,14 +2677,14 @@ async fn reconcile_claim_on_normal_row_skips_vm() {
     let store = Arc::new(FlakyStore::wrapping(Arc::new(
         kotatsu::SqliteStore::open(&path).await.unwrap(),
     )));
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON — it must still yield to bindings
     let pool = SandboxPool::new(cp.clone(), store.clone(), cfg).unwrap();
 
     // An untracked same-image VM — a lost-fleet suspect.
-    let foreign = cp.run(&RunRequest::new("img")).await.unwrap();
+    let foreign = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
     pool.maintain().await.unwrap(); // first sighting
 
     // Second tick: the pin parks at the gate; the row lands mid-flight.
@@ -3023,7 +3168,7 @@ async fn legacy_prefixed_tenant_is_not_a_sentinel() {
     let store = Arc::new(kotatsu::SqliteStore::open(&path).await.unwrap());
     // A live VM under the pool's image first — the row must be an
     // exact self-reference to it.
-    let vm = cp.run(&RunRequest::new("img")).await.unwrap();
+    let vm = cp.run(&RunRequest::new(IMG_ARN)).await.unwrap();
 
     // Write the row raw (TenantKey::new rejects the prefix) with no
     // `kind` value — the column defaults to a normal binding.
@@ -3052,7 +3197,7 @@ async fn legacy_prefixed_tenant_is_not_a_sentinel() {
 
     // The pool sits on the *same* sqlite store holding the legacy
     // row — a MemoryStore pool would see an untracked VM instead.
-    let mut cfg = PoolConfig::new(RunRequest::new("img"));
+    let mut cfg = PoolConfig::new(RunRequest::new(IMG_ARN));
     cfg.warm_size = 0;
     cfg.max_vms = 10;
     cfg.reap_lost_vms = true; // reconcile ON: the strongest adversary

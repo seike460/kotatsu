@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, HttpBody};
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{CloseFrame, Message as AxumMsg, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
@@ -97,9 +97,15 @@ const STRIPPED: &[&str] = &[
     "x-forwarded-proto",
     "x-forwarded-port",
     "x-real-ip",
-    // Same-origin poisoning: tenant apps must not set these on the
-    // shared gateway host. `set-cookie` stays — sandbox apps need it.
+    // Same-origin poisoning: each of these acts on the whole origin
+    // (transport, stored data, service-worker scope, error reporting),
+    // and every tenant shares the gateway host. `set-cookie` stays —
+    // sandbox apps need it — and is clamped to the tenant path instead.
     "alt-svc",
+    "clear-site-data",
+    "nel",
+    "report-to",
+    "service-worker-allowed",
     "strict-transport-security",
     // WS handshake fields have no meaning on the plain-HTTP path.
     "sec-websocket-accept",
@@ -182,20 +188,49 @@ fn forbidden() -> Response {
         .expect("403")
 }
 
-fn err_response(e: &Error) -> Response {
-    let status = match e {
-        Error::InvalidInput(_) => StatusCode::BAD_REQUEST,
-        Error::NotFound { .. } => StatusCode::NOT_FOUND,
-        Error::PoolExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
-        Error::WaitTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
-        _ => StatusCode::BAD_GATEWAY,
-    };
-    let body = serde_json::json!({"error": e.to_string()}).to_string();
+fn json_error(status: StatusCode, msg: &str) -> Response {
     Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
+        .body(Body::from(serde_json::json!({"error": msg}).to_string()))
         .expect("error response")
+}
+
+/// Maps a proxy failure to its status and a fixed body. The error's
+/// `Display` can carry the VM endpoint URL, MicroVM IDs and AWS error
+/// details, so it goes to the server log only.
+fn err_response(e: &Error, tenant: &TenantKey) -> Response {
+    let (status, msg) = match e {
+        Error::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid request"),
+        Error::NotFound { .. } => (StatusCode::NOT_FOUND, "sandbox not found"),
+        Error::PoolExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "no sandbox capacity"),
+        Error::WaitTimeout { .. } => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "timed out waiting for the sandbox",
+        ),
+        _ => (StatusCode::BAD_GATEWAY, "upstream unavailable"),
+    };
+    let error = redact_queries(&e.to_string());
+    tracing::warn!(%tenant, status = status.as_u16(), %error, "proxy request failed");
+    json_error(status, msg)
+}
+
+/// Error text for the log with every URL query replaced: the proxied
+/// target carries the client's query verbatim, and reqwest and
+/// tungstenite errors echo the URL they failed on. That URL is
+/// serialized, so it holds no whitespace: everything from `?` to the next
+/// whitespace goes, including any `)` or quote inside the query.
+fn redact_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '?' {
+            out.push_str("REDACTED");
+            while chars.next_if(|n| !n.is_whitespace()).is_some() {}
+        }
+    }
+    out
 }
 
 /// `/t/{tenant}` — proxy to the VM's root path.
@@ -267,6 +302,9 @@ fn upstream_query(raw: Option<&str>) -> Option<String> {
 /// strips `Domain`, returning `None` when the result cannot be
 /// expressed safely. All tenants share the gateway host, so a VM's
 /// `Path=/` cookie would otherwise be sent to every other tenant's VM.
+/// `__Host-` cookies are clamped too: browsers then reject them (the
+/// prefix requires `Path=/`), but keeping `Path=/` would share them
+/// across tenants.
 /// The value is decoded lossily — an obs-text/UTF-8 cookie value must
 /// not skip clamping entirely.
 fn clamp_cookie_to_tenant(value: &http::HeaderValue, tenant: &str) -> Option<http::HeaderValue> {
@@ -339,7 +377,8 @@ async fn proxy_inner(
         Ok(t) => t,
         Err(e) => {
             kotatsu::metrics::record_http_request(400, start.elapsed());
-            return err_response(&e);
+            // The validation message describes the client's own input.
+            return json_error(StatusCode::BAD_REQUEST, &e.to_string());
         }
     };
     // Tenant authorization: a scoped key may only reach its own tenants.
@@ -354,6 +393,12 @@ async fn proxy_inner(
     if let Some(q) = upstream_query(parts.uri.query()) {
         path.push('?');
         path.push_str(&q);
+    }
+    // `MicrovmEndpoint` rejects these targets too, but only after
+    // `acquire` — a malformed request must not launch or resume a VM.
+    if path.starts_with("//") || path.contains('\\') {
+        kotatsu::metrics::record_http_request(400, start.elapsed());
+        return json_error(StatusCode::BAD_REQUEST, "invalid request");
     }
 
     if is_upgrade(&headers) {
@@ -389,7 +434,7 @@ async fn acquire_or_err(s: &AppState, tenant: &TenantKey) -> Result<Sandbox, Box
     s.pool
         .acquire(tenant)
         .await
-        .map_err(|e| Box::new(err_response(&e)))
+        .map_err(|e| Box::new(err_response(&e, tenant)))
 }
 
 /// Everything `http_proxy` needs to forward one request.
@@ -425,7 +470,7 @@ async fn http_proxy(s: AppState, a: HttpProxyArgs) -> Response {
         Ok(b) => b,
         Err(e) => {
             kotatsu::metrics::record_http_request(502, start.elapsed());
-            return err_response(&e);
+            return err_response(&e, &tenant);
         }
     };
 
@@ -440,14 +485,23 @@ async fn http_proxy(s: AppState, a: HttpProxyArgs) -> Response {
         .header("x-forwarded-for", addr.0.ip().to_string())
         .header("x-forwarded-proto", &s.forwarded_proto);
 
-    let stream = http_body_util::BodyStream::new(req.into_body())
+    // Re-streaming hides the body length, so hyper would send an upload
+    // chunked and drop a GET body. Restore the length the server
+    // decoded when the client framed the body by length.
+    let body = req.into_body();
+    if headers.contains_key(http::header::CONTENT_LENGTH)
+        && let Some(len) = HttpBody::size_hint(&body).exact()
+    {
+        builder = builder.header(http::header::CONTENT_LENGTH, len);
+    }
+    let stream = http_body_util::BodyStream::new(body)
         .try_filter_map(|frame| async move { Ok(frame.into_data().ok()) });
     builder = builder.body(reqwest::Body::wrap_stream(stream));
 
     let upstream = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            let resp = err_response(&Error::Http(e));
+            let resp = err_response(&Error::Http(e), &tenant);
             kotatsu::metrics::record_http_request(502, start.elapsed());
             return resp;
         }
@@ -494,7 +548,7 @@ async fn ws_proxy(
         Ok(w) => w,
         Err(e) => {
             kotatsu::metrics::record_http_request(502, start.elapsed());
-            return err_response(&e);
+            return err_response(&e, &tenant);
         }
     };
 
@@ -505,26 +559,18 @@ async fn ws_proxy(
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
                 kotatsu::metrics::record_http_request(502, start.elapsed());
-                return err_response(&e);
+                return err_response(&e, &tenant);
             }
             Err(_) => {
                 kotatsu::metrics::record_http_request(504, start.elapsed());
-                return Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({"error": "upstream ws connect timed out"}).to_string(),
-                    ))
-                    .expect("504");
+                return json_error(StatusCode::GATEWAY_TIMEOUT, "upstream ws connect timed out");
             }
         };
 
     kotatsu::metrics::record_http_request(101, start.elapsed());
     ws.on_upgrade(move |socket| async move {
         let _session = SessionGauge::new();
-        if let Err(e) = pipe_ws(socket, upstream_stream).await {
-            tracing::debug!(error = %e, "ws pipe ended");
-        }
+        pipe_ws(socket, upstream_stream).await;
     })
 }
 
@@ -548,10 +594,7 @@ impl Drop for SessionGauge {
 // side trusts its peer, and extracting them into `kotatsu` would pull
 // axum into the core crate. Keep behavior in sync when editing.
 
-async fn pipe_ws(
-    socket: WebSocket,
-    upstream_stream: kotatsu::WsStream,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn pipe_ws(socket: WebSocket, upstream_stream: kotatsu::WsStream) {
     let (mut vm_tx, mut vm_rx) = upstream_stream.split();
     let (mut cli_tx, mut cli_rx) = socket.split();
 
@@ -590,7 +633,6 @@ async fn pipe_ws(
         _ = client_to_vm => {}
         _ = vm_to_client => {}
     }
-    Ok(())
 }
 
 fn to_tungstenite(m: AxumMsg) -> TungMsg {
@@ -622,6 +664,72 @@ fn to_axum(m: TungMsg) -> AxumMsg {
         })),
         // Raw frames are filtered out by the read loop, so this arm is
         // unreachable — kept only to satisfy the exhaustive match.
-        TungMsg::Frame(_) => AxumMsg::Binary(bytes::Bytes::new()),
+        TungMsg::Frame(_) => AxumMsg::Binary(Default::default()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_queries_masks_every_url_query() {
+        assert_eq!(
+            redact_queries(
+                "error sending request for url (http://10.0.0.1:8080/p?token=s3cret&x=1)"
+            ),
+            "error sending request for url (http://10.0.0.1:8080/p?REDACTED"
+        );
+        // Delimiters inside the query must not end the redaction.
+        assert_eq!(
+            redact_queries("url (http://h/p?token=s3cret)tail\"q'x>y]z): refused"),
+            "url (http://h/p?REDACTED refused"
+        );
+        assert_eq!(
+            redact_queries("Unable to connect to wss://h/ws?key=abc: refused"),
+            "Unable to connect to wss://h/ws?REDACTED refused"
+        );
+        assert_eq!(redact_queries("no url here"), "no url here");
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_proxy_request_logs_no_client_query() {
+        let logs = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        // Port 1 refuses the connection: a real reqwest error that
+        // carries the request URL, as a dead VM endpoint does.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/app?token=s3cret)tail")
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("s3cret"), "precondition: {err}");
+        let resp = err_response(&Error::Http(err), &TenantKey::new("t1").unwrap());
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(text.contains("proxy request failed"), "{text}");
+        assert!(!text.contains("s3cret") && !text.contains("tail"), "{text}");
     }
 }

@@ -4,15 +4,28 @@
 
 mod common;
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Request, WebSocketUpgrade};
 use axum::response::Response;
-use axum::routing::{any, get};
-use common::{gateway_router, serve};
+use axum::routing::{any, get, post};
+use common::{gateway_router, gateway_state, pool_config, serve};
 use futures_util::{SinkExt, StreamExt};
-use kotatsu::mock::MockControlPlane;
+use kotatsu::ControlPlane;
+use kotatsu::mock::{MockBehavior, MockControlPlane};
+
+/// The header's value as text, or `""` when absent.
+fn header(req: &Request, name: &str) -> String {
+    req.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned()
+}
 
 /// Upstream "VM": echoes the auth/port headers and the path+body it saw.
 fn upstream_app() -> Router {
@@ -28,6 +41,33 @@ fn upstream_app() -> Router {
                     .header("set-cookie", "d=4; Path=/t/u1evil")
                     // No Path at all — must gain the tenant prefix.
                     .header("set-cookie", "e=5")
+                    .body(axum::body::Body::from("ok"))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/host-cookie",
+            get(|| async {
+                Response::builder()
+                    .header("set-cookie", "__Host-csrf=1; Secure; Path=/")
+                    .body(axum::body::Body::from("ok"))
+                    .unwrap()
+            }),
+        )
+        .route(
+            "/origin-wide",
+            get(|| async {
+                Response::builder()
+                    .header("strict-transport-security", "max-age=31536000")
+                    .header("alt-svc", "h3=\":443\"")
+                    .header("service-worker-allowed", "/")
+                    .header("clear-site-data", "\"cookies\", \"storage\"")
+                    .header("nel", r#"{"report_to":"t","max_age":86400,"success_fraction":1.0}"#)
+                    .header(
+                        "report-to",
+                        r#"{"group":"t","max_age":86400,"endpoints":[{"url":"https://collector.example/r"}]}"#,
+                    )
+                    .header("x-app", "kept")
                     .body(axum::body::Body::from("ok"))
                     .unwrap()
             }),
@@ -51,52 +91,27 @@ fn upstream_app() -> Router {
         .route(
             "/{*p}",
             any(|req: Request| async move {
-                let auth = req
-                    .headers()
-                    .get("x-aws-proxy-auth")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let port = req
-                    .headers()
-                    .get("x-aws-proxy-port")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let custom = req
-                    .headers()
-                    .get("x-custom")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let xff = req
-                    .headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let nominated = req
-                    .headers()
-                    .get("x-nominated")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_owned();
-                let client_auth = req.headers().contains_key("authorization");
-                let path_q = req
-                    .uri()
-                    .path_and_query()
-                    .map(|pq| pq.to_string())
-                    .unwrap_or_default();
+                let mut echoed = serde_json::json!({
+                    "auth": header(&req, "x-aws-proxy-auth"),
+                    "port": header(&req, "x-aws-proxy-port"),
+                    "custom": header(&req, "x-custom"),
+                    "xff": header(&req, "x-forwarded-for"),
+                    "proto": header(&req, "x-forwarded-proto"),
+                    "nominated": header(&req, "x-nominated"),
+                    "content_length": header(&req, "content-length"),
+                    "transfer_encoding": header(&req, "transfer-encoding"),
+                    "client_auth": req.headers().contains_key("authorization"),
+                    "path": req
+                        .uri()
+                        .path_and_query()
+                        .map(|pq| pq.to_string())
+                        .unwrap_or_default(),
+                });
                 let body = axum::body::to_bytes(req.into_body(), usize::MAX)
                     .await
                     .unwrap();
-                serde_json::json!({
-                    "auth": auth, "port": port, "custom": custom,
-                    "xff": xff, "nominated": nominated,
-                    "client_auth": client_auth, "path": path_q,
-                    "body": String::from_utf8_lossy(&body),
-                })
-                .to_string()
+                echoed["body"] = String::from_utf8_lossy(&body).into();
+                echoed.to_string()
             }),
         )
 }
@@ -241,6 +256,83 @@ async fn set_cookie_is_clamped_to_tenant_path() {
     assert!(cookie("e=5").contains("Path=/t/u1"), "e: {cookies:?}");
 }
 
+/// Upstream redirects go back to the client untouched. Following them
+/// inside the gateway would let a VM make kotatsud fetch internal URLs
+/// (SSRF) with X-aws-proxy-auth attached, and would swallow the
+/// redirect's own Set-Cookie.
+#[tokio::test]
+async fn upstream_redirects_are_passed_through_not_followed() {
+    let leak_hits = Arc::new(AtomicUsize::new(0));
+    let hits = leak_hits.clone();
+    let internal = serve(Router::new().fallback(move || {
+        hits.fetch_add(1, Ordering::SeqCst);
+        async { "internal" }
+    }))
+    .await;
+    let target = format!("http://{internal}/latest/meta-data/");
+    let (see_other, found) = (target.clone(), target.clone());
+    let upstream = serve(
+        Router::new()
+            .route(
+                "/see-other",
+                get(move || async move {
+                    Response::builder()
+                        .status(303)
+                        .header("location", see_other)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/login",
+                post(move || async move {
+                    Response::builder()
+                        .status(302)
+                        .header("location", found)
+                        .header("set-cookie", "session=1; Path=/")
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }),
+            ),
+    )
+    .await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = http
+        .get(format!("http://{gw}/t/u1/see-other"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 303);
+    assert_eq!(resp.headers()["location"], target.as_str());
+
+    let resp = http
+        .post(format!("http://{gw}/t/u1/login"))
+        .bearer_auth("k1")
+        .body("user=a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 302);
+    assert_eq!(resp.headers()["location"], target.as_str());
+    assert!(
+        resp.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .starts_with("session=1"),
+        "{:?}",
+        resp.headers()
+    );
+
+    assert_eq!(leak_hits.load(Ordering::SeqCst), 0);
+}
+
 /// A tenant-scoped key authenticates for its own tenant but is
 /// forbidden (403) on every other — a leaked scoped key cannot pivot.
 #[tokio::test]
@@ -301,12 +393,7 @@ async fn encoded_path_chars_are_preserved() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let path = body["path"].as_str().unwrap();
-    assert!(path.contains("q=v"), "query was lost to fragment: {path}");
-    assert!(
-        path.contains("a%2Fb") || path.contains("a/b"),
-        "%2F mangled: {path}"
-    );
+    assert_eq!(body["path"], "/a%2Fb%23frag?q=v");
 }
 
 /// Non-UTF-8 percent-encoded bytes in the query reach the VM verbatim —
@@ -444,6 +531,14 @@ async fn metrics_and_healthz_work() {
         .unwrap();
     assert_eq!(h.status(), 200);
 
+    let proxied = http
+        .get(format!("http://{gw}/t/u1/x"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxied.status(), 200);
+
     let m = http
         .get(format!("http://{gw}/metrics"))
         .send()
@@ -454,15 +549,22 @@ async fn metrics_and_healthz_work() {
         m.headers()["content-type"].to_str().unwrap(),
         "text/plain; version=0.0.4"
     );
+    let body = m.text().await.unwrap();
+    for series in [
+        "# TYPE kotatsu_gateway_requests_total counter",
+        "kotatsu_gateway_requests_total{status_class=\"2xx\"} ",
+        "# TYPE kotatsu_gateway_request_seconds summary",
+        "kotatsu_pool_acquire_total{outcome=\"ok\"} ",
+        "kotatsu_vm_launch_total ",
+    ] {
+        assert!(body.contains(series), "{series:?} missing from:\n{body}");
+    }
 }
 
 /// WebSocket proxy: browser-style `?key=` auth (no header) plus an echo
 /// upstream — proves the subprotocol handshake and frame relay work.
 #[tokio::test]
 async fn websocket_proxy_echoes_through() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("kotatsud=debug,kotatsu=debug")
-        .try_init();
     let upstream = serve(upstream_app()).await;
     let (app, _cp) = gateway_app(&format!("http://{upstream}"));
     let gw = serve(app).await;
@@ -487,4 +589,286 @@ async fn websocket_proxy_echoes_through() {
         err,
         tokio_tungstenite::tungstenite::Error::Http(_)
     ));
+}
+
+/// `?key=` is a browser-WebSocket credential only — on a plain HTTP
+/// request it authenticates nothing.
+#[tokio::test]
+async fn query_key_without_websocket_upgrade_is_rejected() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::get(format!("http://{gw}/t/u1/x?key=k1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// A scoped key in `?key=` is still bound to its tenant: it opens its
+/// own tenant's WebSocket and gets 403 on a sibling's.
+#[tokio::test]
+async fn scoped_query_key_cannot_open_another_tenants_websocket() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app_keys(
+        &format!("http://{upstream}"),
+        [(
+            "scoped-u1".to_owned(),
+            Some(HashSet::from(["u1".to_owned()])),
+        )],
+    );
+    let gw = serve(app).await;
+
+    let (_ws, resp) = tokio_tungstenite::connect_async(format!("ws://{gw}/t/u1/ws?key=scoped-u1"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 101);
+    let err = tokio_tungstenite::connect_async(format!("ws://{gw}/t/u2/ws?key=scoped-u1"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 403),
+        "{err:?}"
+    );
+}
+
+/// Contract and identity headers a client injects never reach the VM
+/// as sent: the pool's token and port and the gateway's own view of
+/// the peer replace them.
+#[tokio::test]
+async fn client_injected_contract_and_identity_headers_are_replaced() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/x"))
+        .bearer_auth("k1")
+        .header("x-aws-proxy-auth", "forged-token")
+        .header("x-aws-proxy-port", "9999")
+        .header("x-forwarded-for", "6.6.6.6")
+        .header("x-forwarded-proto", "https")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["auth"].as_str().unwrap().starts_with("dev-token-"),
+        "{body}"
+    );
+    assert_eq!(body["port"], "8080");
+    assert_eq!(body["xff"], "127.0.0.1");
+    assert_eq!(body["proto"], "http");
+}
+
+/// All tenants share the gateway origin, so upstream headers that act
+/// on the whole origin must not reach the browser. Other app headers
+/// pass through.
+#[tokio::test]
+async fn origin_wide_response_headers_are_stripped() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/origin-wide"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    for name in [
+        "strict-transport-security",
+        "alt-svc",
+        "service-worker-allowed",
+        "clear-site-data",
+        "nel",
+        "report-to",
+    ] {
+        assert!(
+            !resp.headers().contains_key(name),
+            "{name} leaked: {:?}",
+            resp.headers()
+        );
+    }
+    assert_eq!(resp.headers()["x-app"], "kept");
+}
+
+/// A `__Host-` cookie is clamped like any other. Browsers then reject
+/// it (the prefix requires `Path=/`), but keeping `Path=/` would send
+/// it to every tenant.
+#[tokio::test]
+async fn host_prefixed_cookie_is_still_clamped() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/u1/host-cookie"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers()["set-cookie"],
+        "__Host-csrf=1; Secure; Path=/t/u1"
+    );
+}
+
+/// A body framed by `Content-Length` keeps that framing upstream — an
+/// upload is not turned into chunked, and a GET body is not dropped.
+/// A chunked body stays chunked, and a bodiless GET gains no length.
+#[tokio::test]
+async fn request_body_framing_reaches_the_vm() {
+    let upstream = serve(upstream_app()).await;
+    let (app, _cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::new();
+    let echo = |req: reqwest::RequestBuilder| async move {
+        let resp = req.bearer_auth("k1").send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        resp.json::<serde_json::Value>().await.unwrap()
+    };
+
+    let post = echo(http.post(format!("http://{gw}/t/u1/echo")).body("hello")).await;
+    assert_eq!(post["content_length"], "5", "{post}");
+    assert_eq!(post["transfer_encoding"], "", "{post}");
+    assert_eq!(post["body"], "hello");
+
+    let get = echo(http.get(format!("http://{gw}/t/u1/echo")).body("q=1")).await;
+    assert_eq!(get["content_length"], "3", "{get}");
+    assert_eq!(get["body"], "q=1");
+
+    let bodiless = echo(http.get(format!("http://{gw}/t/u1/echo"))).await;
+    assert_eq!(bodiless["content_length"], "", "{bodiless}");
+    assert_eq!(bodiless["transfer_encoding"], "", "{bodiless}");
+
+    let chunks = futures_util::stream::iter([Ok::<_, std::io::Error>("part-1,"), Ok("part-2")]);
+    let chunked = echo(
+        http.post(format!("http://{gw}/t/u1/echo"))
+            .body(reqwest::Body::wrap_stream(chunks)),
+    )
+    .await;
+    assert_eq!(chunked["transfer_encoding"], "chunked", "{chunked}");
+    assert_eq!(chunked["content_length"], "", "{chunked}");
+    assert_eq!(chunked["body"], "part-1,part-2");
+}
+
+/// `allow_unauthenticated` admits a request that carries no key.
+#[tokio::test]
+async fn allow_unauthenticated_admits_requests_without_a_key() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{upstream}")));
+    let mut state = gateway_state(cp, HashMap::new(), pool_config());
+    state.allow_unauthenticated = true;
+    let gw = serve(kotatsud::gateway::router(state)).await;
+
+    let resp = reqwest::get(format!("http://{gw}/t/u1/x")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["path"], "/x");
+}
+
+/// Sends `GET /t/{tenant}/x` with the test key and returns the status
+/// and the raw body.
+async fn get_status_and_body(gw: std::net::SocketAddr, tenant: &str) -> (u16, String) {
+    let resp = reqwest::Client::new()
+        .get(format!("http://{gw}/t/{tenant}/x"))
+        .bearer_auth("k1")
+        .send()
+        .await
+        .unwrap();
+    (resp.status().as_u16(), resp.text().await.unwrap())
+}
+
+/// At `max_vms` a new tenant gets 503 with a fixed body.
+#[tokio::test]
+async fn pool_exhaustion_is_503_with_a_fixed_body() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{upstream}")));
+    let mut cfg = pool_config();
+    cfg.max_vms = 1;
+    let keys = HashMap::from([("k1".to_owned(), None)]);
+    let gw = serve(kotatsud::gateway::router(gateway_state(cp, keys, cfg))).await;
+
+    assert_eq!(get_status_and_body(gw, "u1").await.0, 200);
+    assert_eq!(
+        get_status_and_body(gw, "u2").await,
+        (503, r#"{"error":"no sandbox capacity"}"#.to_owned())
+    );
+}
+
+/// A VM that does not boot within the wait budget gives 504. The body
+/// is fixed — the waiter's error names the MicroVM.
+#[tokio::test]
+async fn wait_timeout_is_504_without_the_microvm_id() {
+    let upstream = serve(upstream_app()).await;
+    let cp = Arc::new(
+        MockControlPlane::with_behavior(MockBehavior {
+            boot_time: Duration::from_secs(60),
+            ..Default::default()
+        })
+        .endpoint_override(&format!("http://{upstream}")),
+    );
+    let mut cfg = pool_config();
+    cfg.wait.timeout = Duration::from_millis(200);
+    let keys = HashMap::from([("k1".to_owned(), None)]);
+    let gw = serve(kotatsud::gateway::router(gateway_state(cp, keys, cfg))).await;
+
+    assert_eq!(
+        get_status_and_body(gw, "u1").await,
+        (
+            504,
+            r#"{"error":"timed out waiting for the sandbox"}"#.to_owned()
+        )
+    );
+}
+
+/// An unreachable VM endpoint gives 502. The body is fixed — the HTTP
+/// client's error names the endpoint URL.
+#[tokio::test]
+async fn unreachable_vm_is_502_without_the_endpoint_url() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let (app, _cp) = gateway_app(&format!("http://{closed}"));
+    let gw = serve(app).await;
+
+    assert_eq!(
+        get_status_and_body(gw, "u1").await,
+        (502, r#"{"error":"upstream unavailable"}"#.to_owned())
+    );
+}
+
+/// A target the VM endpoint rejects anyway (`//…`, a backslash) is 400
+/// before `acquire`: a malformed request must not launch or resume a VM.
+#[tokio::test]
+async fn malformed_target_is_400_without_launching_a_vm() {
+    let upstream = serve(upstream_app()).await;
+    let (app, cp) = gateway_app(&format!("http://{upstream}"));
+    let gw = serve(app).await;
+    let http = reqwest::Client::new();
+
+    for target in ["/t/u1//x", "/t/u1/x?q=a\\b"] {
+        let resp = http
+            .get(format!("http://{gw}{target}"))
+            .bearer_auth("k1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{target}");
+        assert_eq!(
+            resp.text().await.unwrap(),
+            r#"{"error":"invalid request"}"#,
+            "{target}"
+        );
+    }
+    assert!(cp.list(None, None).await.unwrap().is_empty());
+
+    // The same tenant with a valid target does launch a VM.
+    assert_eq!(get_status_and_body(gw, "u1").await.0, 200);
+    assert_eq!(cp.list(None, None).await.unwrap().len(), 1);
 }

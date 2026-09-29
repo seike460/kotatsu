@@ -28,6 +28,8 @@ mod waiter;
 
 pub use control_plane::{AwsControlPlane, ControlPlane};
 pub use cost::{CostBreakdown, MicrovmSpec, PriceBook, Usage};
+#[doc(hidden)]
+pub use endpoint::ws_tls_connector;
 pub use endpoint::{MicrovmEndpoint, WsRequest, WsStream};
 pub use error::{Error, Result};
 pub use pool::{PoolConfig, PoolReport, PoolStats, Sandbox, SandboxPool, WarmWindow};

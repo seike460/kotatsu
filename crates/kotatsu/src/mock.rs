@@ -1,4 +1,6 @@
-//! In-memory [`ControlPlane`] implementation for tests and `kotatsu dev`.
+//! In-memory [`ControlPlane`] implementation for tests and
+//! `kotatsud --mock` (whose `--mock-endpoint` can point at the
+//! `kotatsu dev` emulator).
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -280,8 +282,10 @@ impl ControlPlane for MockControlPlane {
         }
         let mut guard = self.inner.lock();
         let entry = Self::lookup(&mut guard, id)?;
+        // Parity with `terminate-microvm`, which is idempotent: a VM that
+        // is already terminating or terminated terminates successfully.
         if !entry.vm.state.is_live() {
-            return Err(Error::Terminated(id.to_string()));
+            return Ok(());
         }
         entry.clear_transition();
         if self.behavior.terminate_time.is_zero() {
@@ -349,7 +353,7 @@ impl ControlPlane for MockControlPlane {
         Ok(AuthToken {
             value: format!("dev-token-{}", uuid::Uuid::new_v4()),
             issued_at: Instant::now(),
-            ttl: Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl: crate::control_plane::ttl_duration(ttl_minutes),
             scope: scope.to_vec(),
             kind: TokenKind::Port,
         })
@@ -365,7 +369,7 @@ impl ControlPlane for MockControlPlane {
         Ok(AuthToken {
             value: format!("dev-shell-token-{}", uuid::Uuid::new_v4()),
             issued_at: Instant::now(),
-            ttl: Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl: crate::control_plane::ttl_duration(ttl_minutes),
             scope: Vec::new(),
             kind: TokenKind::Shell,
         })

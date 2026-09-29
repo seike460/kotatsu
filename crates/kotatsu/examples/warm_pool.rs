@@ -36,6 +36,19 @@ async fn main() -> kotatsu::Result<()> {
     // produce a request builder with the contract headers set.
     sb.release().await?; // terminates the VM and drops the tenant binding
 
+    // Tenant 2 suspends instead: the binding survives, so its next
+    // `acquire` resumes the same VM rather than taking a warm one.
+    let tenant2 = TenantKey::new("tenant-2")?;
+    let sb = pool.acquire(&tenant2).await?;
+    let suspended = sb.vm().id().clone();
+    sb.suspend().await?;
+    let sb = pool.acquire(&tenant2).await?;
+    println!(
+        "tenant-2 resumed {} (same VM: {})",
+        sb.vm().id(),
+        *sb.vm().id() == suspended
+    );
+
     // Re-warm for the next tenant.
     pool.maintain().await?;
     let stats = pool.stats().await;

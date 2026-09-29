@@ -26,11 +26,21 @@
 //! unauthenticated operator API on the same listener. Only the exact
 //! method+path pairs are intercepted: other `/_kotatsu/*` paths fall
 //! through to the app, while a wrong method on a registered path is a
-//! 405 before the app sees it.
+//! 405 before the app sees it. `GET /_kotatsu/state` answers
+//! `{"state":"RUNNING"}`, plus `"error"` when the state is `FAILED`.
+//! The `POST` routes answer 200, or 409 with the reason, and refuse a
+//! request carrying `Origin` (a browser page) with 403.
 //!
 //! Emulated hook order at boot: `validate → run → ready-poll` — the
 //! real platform drives `ready`/`validate` at image-build time and the
 //! runtime hooks at boot; the emulator collapses both into boot.
+//!
+//! Hook failures: a boot hook that fails or times out leaves the
+//! emulator `FAILED`, and every request then gets 500 (on AWS a failed
+//! `/run` may send the VM straight to `TERMINATING`). A failed
+//! `/suspend`, `/resume` or `/terminate` hook leaves the state as it
+//! was, so the call can be retried; only a `/terminate` during boot
+//! ends `FAILED`. A request whose auto-resume fails gets 502, as on AWS.
 
 mod emulator;
 mod proxy;

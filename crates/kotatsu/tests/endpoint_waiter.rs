@@ -1,12 +1,15 @@
 //! Tests for `TokenVending`, `MicrovmEndpoint` and the waiters, all
 //! against `MockControlPlane` (no AWS credentials required).
 
+mod common;
+
 use kotatsu::mock::{MockBehavior, MockControlPlane};
 use kotatsu::{
     ControlPlane, Error, MicrovmEndpoint, PortSpec, RunRequest, RunningVm, State, TokenKind,
     TokenVending, WaitPolicy, wait_for_state, wait_until_running,
 };
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 fn policy() -> WaitPolicy {
@@ -250,9 +253,51 @@ async fn hostile_paths_cannot_escape_origin() {
 }
 
 #[tokio::test]
+async fn endpoint_does_not_follow_upstream_redirects() {
+    // A VM answering with a redirect must not make the client fetch
+    // the target — that would carry X-aws-proxy-auth off the VM origin.
+    let (leak, leak_hits) = common::canned_http(200, &[], "secret").await;
+    let target = format!("http://{leak}/latest/meta-data/");
+    for status in [301, 302, 303, 307, 308] {
+        let (vm_addr, _) = common::canned_http(status, &[("location", &target)], "").await;
+        let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("http://{vm_addr}")));
+        let vm = cp.run(&RunRequest::new("img")).await.unwrap();
+        let running = wait_until_running(&*cp, &vm.id, &policy()).await.unwrap();
+        let ep = MicrovmEndpoint::new_insecure(&running, Arc::new(TokenVending::new(cp))).unwrap();
+
+        let resp = ep.get("/start").await.unwrap().send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), status);
+        assert_eq!(resp.headers()["location"], target.as_str());
+    }
+    assert_eq!(leak_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn wss_connect_reaches_the_tls_handshake() {
+    // Both rustls providers are compiled into this crate's dependency
+    // graph, so a handshake that leaves the provider choice to rustls
+    // panics instead of returning an error.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            drop(sock);
+        }
+    });
+    let cp = Arc::new(MockControlPlane::new().endpoint_override(&format!("https://{addr}")));
+    let ep = running_endpoint(cp).await;
+    let ws = ep.websocket("/ws", None).await.unwrap();
+    assert_eq!(ws.url().scheme(), "wss");
+    let err = ws.connect().await.unwrap_err();
+    assert!(matches!(err, Error::Ws(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn wait_for_state_terminated_is_reachable() {
+    // Far wider than scheduler jitter, so the TERMINATING check below
+    // runs inside the window.
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        terminate_time: Duration::from_millis(60),
+        terminate_time: Duration::from_millis(500),
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
@@ -286,16 +331,18 @@ async fn resume_slower_than_poll_interval_completes() {
 #[tokio::test]
 async fn duplicate_resume_is_idempotent_in_mock() {
     let cp = MockControlPlane::with_behavior(MockBehavior {
-        resume_time: Duration::from_millis(150),
+        resume_time: Duration::from_millis(400),
         ..Default::default()
     });
     let vm = cp.run(&RunRequest::new("img")).await.unwrap();
     cp.suspend(&vm.id).await.unwrap();
     cp.resume(&vm.id).await.unwrap();
     // A second resume while the transition is armed must not re-arm it.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    // The check lands past the first deadline (100+320 > 400ms) but
+    // before a re-armed one (320 < 400ms after the second call).
+    tokio::time::sleep(Duration::from_millis(100)).await;
     cp.resume(&vm.id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(160)).await;
+    tokio::time::sleep(Duration::from_millis(320)).await;
     assert_eq!(cp.get(&vm.id).await.unwrap().state, State::Running);
 }
 

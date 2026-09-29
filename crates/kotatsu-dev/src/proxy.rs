@@ -10,6 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use tokio_tungstenite::tungstenite::Message as TungMsg;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::emulator::{DevState, Shared};
 
@@ -40,7 +41,8 @@ const STRIPPED: &[&str] = &[
     "x-aws-proxy-auth",
     "x-aws-proxy-port",
     // The client's WS handshake is answered by the emulator; the app
-    // gets a fresh one without contract fields.
+    // gets a fresh one with the client's other headers (Cookie, Origin,
+    // …) but no subprotocols.
     "sec-websocket-accept",
     "sec-websocket-extensions",
     "sec-websocket-key",
@@ -143,9 +145,10 @@ async fn gate(s: &Shared) -> Result<(), Box<Response>> {
             StatusCode::SERVICE_UNAVAILABLE,
             "microvm is booting",
         ))),
+        // AWS answers a request whose auto-resume fails with 502.
         DevState::Suspended if s.cfg.auto_resume => s.resume().await.map_err(|e| {
             Box::new(err(
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::BAD_GATEWAY,
                 &format!("auto-resume failed: {e}"),
             ))
         }),
@@ -204,7 +207,7 @@ pub(crate) async fn contract_proxy(State(s): State<Arc<Shared>>, req: Request) -
     if is_ws {
         use axum::extract::FromRequestParts;
         return match WebSocketUpgrade::from_request_parts(&mut parts, &s).await {
-            Ok(ws) => ws_proxy(s, ws, path_q).await,
+            Ok(ws) => ws_proxy(s, ws, &parts.headers, path_q).await,
             Err(rejection) => rejection.into_response(),
         };
     }
@@ -251,7 +254,12 @@ async fn http_proxy(
 
 /// Connects to the app BEFORE answering 101 — a dead app yields a real
 /// 502 instead of an instantly-dead WebSocket (same rule as kotatsud).
-async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Response {
+async fn ws_proxy(
+    s: Arc<Shared>,
+    ws: WebSocketUpgrade,
+    headers: &HeaderMap,
+    path_q: String,
+) -> Response {
     let mut app_url = match s.app.join(&path_q) {
         Ok(u) if u.origin() == s.app.origin() => u,
         _ => return err(StatusCode::BAD_REQUEST, "path escapes the app origin"),
@@ -264,9 +272,28 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
     if app_url.set_scheme(scheme).is_err() {
         return err(StatusCode::BAD_REQUEST, "app url cannot become ws");
     }
+    let mut app_req = match app_url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &format!("app ws request: {e}")),
+    };
+    let nominated = connection_nominated(headers);
+    for (name, value) in headers {
+        if !stripped(name.as_str(), &nominated) {
+            app_req.headers_mut().append(name.clone(), value.clone());
+        }
+    }
+    let tls = match kotatsu::ws_tls_connector() {
+        Ok(c) => c,
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("app ws tls: {e}"),
+            );
+        }
+    };
     let app_stream = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio_tungstenite::connect_async(app_url.as_str()),
+        tokio_tungstenite::connect_async_tls_with_config(app_req, None, false, Some(tls)),
     )
     .await
     {
@@ -275,11 +302,7 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
         Err(_) => return err(StatusCode::GATEWAY_TIMEOUT, "app ws connect timed out"),
     };
     ws.protocols([WS_BASE])
-        .on_upgrade(move |socket| async move {
-            if let Err(e) = pipe_ws(socket, app_stream).await {
-                tracing::debug!(error = %e, "dev ws pipe ended");
-            }
-        })
+        .on_upgrade(move |socket| pipe_ws(socket, app_stream))
 }
 
 // NOTE: mirrors `pipe_ws`/`to_tungstenite`/`to_axum` in
@@ -288,10 +311,7 @@ async fn ws_proxy(s: Arc<Shared>, ws: WebSocketUpgrade, path_q: String) -> Respo
 // auth/tenant headers, and extracting them into `kotatsu` would pull
 // axum into the core crate. Keep behavior in sync when editing.
 
-async fn pipe_ws(
-    socket: WebSocket,
-    app_stream: kotatsu::WsStream,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn pipe_ws(socket: WebSocket, app_stream: kotatsu::WsStream) {
     let (mut app_tx, mut app_rx) = app_stream.split();
     let (mut cli_tx, mut cli_rx) = socket.split();
 
@@ -327,13 +347,12 @@ async fn pipe_ws(
         _ = to_app => {}
         _ = to_client => {}
     }
-    Ok(())
 }
 
 fn to_tungstenite(m: AxumMsg) -> TungMsg {
     match m {
         AxumMsg::Text(t) => TungMsg::Text(t.as_str().into()),
-        AxumMsg::Binary(b) => TungMsg::Binary(b.to_vec().into()),
+        AxumMsg::Binary(b) => TungMsg::Binary(b),
         AxumMsg::Close(c) => {
             TungMsg::Close(
                 c.map(|f| tokio_tungstenite::tungstenite::protocol::CloseFrame {
@@ -342,21 +361,23 @@ fn to_tungstenite(m: AxumMsg) -> TungMsg {
                 }),
             )
         }
-        AxumMsg::Ping(p) => TungMsg::Ping(p.to_vec().into()),
-        AxumMsg::Pong(p) => TungMsg::Pong(p.to_vec().into()),
+        AxumMsg::Ping(p) => TungMsg::Ping(p),
+        AxumMsg::Pong(p) => TungMsg::Pong(p),
     }
 }
 
 fn to_axum(m: TungMsg) -> AxumMsg {
     match m {
         TungMsg::Text(t) => AxumMsg::Text(t.as_str().into()),
-        TungMsg::Binary(b) => AxumMsg::Binary(b.to_vec().into()),
+        TungMsg::Binary(b) => AxumMsg::Binary(b),
         TungMsg::Close(c) => AxumMsg::Close(c.map(|f| axum::extract::ws::CloseFrame {
             code: f.code.into(),
             reason: f.reason.as_str().into(),
         })),
-        TungMsg::Ping(p) => AxumMsg::Ping(p.to_vec().into()),
-        TungMsg::Pong(p) => AxumMsg::Pong(p.to_vec().into()),
-        TungMsg::Frame(_) => AxumMsg::Binary(Vec::new().into()),
+        TungMsg::Ping(p) => AxumMsg::Ping(p),
+        TungMsg::Pong(p) => AxumMsg::Pong(p),
+        // Raw frames are filtered out by the read loop, so this arm is
+        // unreachable — kept only to satisfy the exhaustive match.
+        TungMsg::Frame(_) => AxumMsg::Binary(Default::default()),
     }
 }

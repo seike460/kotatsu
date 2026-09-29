@@ -8,7 +8,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 pub enum Error {
     /// An AWS API call failed.
-    #[error("aws {op} failed: {source}")]
+    ///
+    /// `Display` includes the SDK error's whole source chain — the
+    /// service error code and message, or the transport cause.
+    #[error("aws {op} failed: {}", Chain(&**.source))]
     Aws {
         /// Name of the AWS operation that failed.
         op: &'static str,
@@ -28,7 +31,7 @@ pub enum Error {
     /// In waiters this is transient by definition — the next `get` poll
     /// disambiguates whether the in-flight transition reached the desired
     /// state — so [`Error::is_transient`] returns `true` here.
-    #[error("aws {op} conflict: {source}")]
+    #[error("aws {op} conflict: {}", Chain(&**.source))]
     Conflict {
         /// Name of the AWS operation that reported the conflict.
         op: &'static str,
@@ -173,6 +176,32 @@ impl Error {
 
     pub(crate) fn invalid(msg: impl Into<String>) -> Self {
         Self::InvalidInput(msg.into())
+    }
+}
+
+/// Renders an error and its `source()` chain, `: `-separated.
+///
+/// `SdkError`'s own `Display` is a fixed label ("service error",
+/// "dispatch failure"); the error code, message and transport cause
+/// sit further down the chain, where `%e` logging never looks. SDK
+/// operation errors repeat their modeled exception as their source,
+/// so a link that renders the same as the previous one is skipped.
+struct Chain<'a>(&'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Display for Chain<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut prev = self.0.to_string();
+        f.write_str(&prev)?;
+        let mut next = self.0.source();
+        while let Some(e) = next {
+            let cur = e.to_string();
+            if cur != prev {
+                write!(f, ": {cur}")?;
+                prev = cur;
+            }
+            next = e.source();
+        }
+        Ok(())
     }
 }
 

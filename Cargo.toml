@@ -7,29 +7,31 @@ edition = "2024"
 rust-version = "1.94.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/seike460/kotatsu"
-homepage = "https://github.com/seike460/kotatsu"
 
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-config = "1"
 aws-sdk-lambdamicrovms = "1.4"
 axum = { version = "0.8", features = ["ws"] }
-bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
 humantime-serde = "1"
-kotatsu = { path = "crates/kotatsu", version = "0.1.0" }
-kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.0" }
+kotatsu = { path = "crates/kotatsu", version = "0.1.1" }
+kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.1" }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
 rust_decimal = "1"
 rust_decimal_macros = "1"
+# The AWS SDK enables rustls' `aws-lc-rs` provider and reqwest enables
+# `ring`, so rustls cannot pick a process default on its own; wss
+# handshakes pass an explicit provider (see `kotatsu::ws_tls_connector`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -37,13 +39,14 @@ tokio = { version = "1", features = ["full"] }
 # `bundled` links libsqlite3 statically — release binaries and the
 # distroless-ish runtime image stay self-contained (bookworm-slim has
 # no libsqlite3-0).
-tokio-rusqlite = { version = "0.6", features = ["bundled"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "url", "rustls-tls-webpki-roots"] }
+tokio-rusqlite = { version = "0.8", features = ["bundled"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "url", "rustls-tls-webpki-roots"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4"] }
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

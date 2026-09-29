@@ -33,8 +33,9 @@ pub trait ControlPlane: Send + Sync {
     ) -> Result<Vec<MicrovmSummary>>;
     /// Mints a JWE auth token for traffic to a MicroVM (`create-microvm-auth-token`).
     ///
-    /// Returns the raw `X-aws-proxy-auth` header value. The caller decides the
-    /// port scope; `ttl` is capped at [`crate::MAX_TOKEN_TTL_MINUTES`].
+    /// Returns an [`AuthToken`] whose [`AuthToken::header_value`] is the
+    /// `X-aws-proxy-auth` value. The caller decides the port scope;
+    /// `ttl_minutes` is capped at [`crate::MAX_TOKEN_TTL_MINUTES`].
     async fn mint_token(
         &self,
         id: &MicrovmId,
@@ -272,7 +273,7 @@ impl ControlPlane for AwsControlPlane {
         auth_token_from(
             out.auth_token(),
             scope.to_vec(),
-            Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl_duration(ttl_minutes),
             TokenKind::Port,
         )
     }
@@ -290,7 +291,7 @@ impl ControlPlane for AwsControlPlane {
         auth_token_from(
             out.auth_token(),
             Vec::new(),
-            Duration::from_secs(u64::from(ttl_minutes as u32) * 60),
+            ttl_duration(ttl_minutes),
             TokenKind::Shell,
         )
     }
@@ -304,6 +305,12 @@ pub(crate) fn checked_ttl_minutes(ttl_minutes: i32) -> Result<i32> {
         return Err(Error::invalid("ttl_minutes must be positive"));
     }
     Ok(ttl_minutes.min(crate::MAX_TOKEN_TTL_MINUTES))
+}
+
+/// Token lifetime for a positive TTL in minutes (see
+/// [`checked_ttl_minutes`]).
+pub(crate) fn ttl_duration(ttl_minutes: i32) -> Duration {
+    Duration::from_secs(u64::from(ttl_minutes.unsigned_abs()) * 60)
 }
 
 /// Maps `ResourceNotFoundException` service errors to [`Error::NotFound`]

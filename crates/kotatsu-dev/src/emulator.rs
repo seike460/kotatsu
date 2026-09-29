@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{any, get, post};
 use serde::Serialize;
 use tokio::sync::watch;
@@ -19,7 +19,7 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DevState {
-    /// Booting: `/run` then `/ready` polling is in progress.
+    /// Booting: `/validate`, `/run`, then `/ready` polling is in progress.
     Pending,
     /// Serving traffic.
     Running,
@@ -27,18 +27,28 @@ pub enum DevState {
     Suspended,
     /// Final state; every request gets 410.
     Terminated,
-    /// A hook call failed or timed out.
+    /// Boot did not finish: a boot hook (`/validate`, `/run`, `/ready`)
+    /// failed or timed out, or a `/terminate` hook failed mid-boot.
     Failed(String),
+}
+
+impl DevState {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Pending => "PENDING",
+            Self::Running => "RUNNING",
+            Self::Suspended => "SUSPENDED",
+            Self::Terminated => "TERMINATED",
+            Self::Failed(_) => "FAILED",
+        }
+    }
 }
 
 impl std::fmt::Display for DevState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pending => write!(f, "PENDING"),
-            Self::Running => write!(f, "RUNNING"),
-            Self::Suspended => write!(f, "SUSPENDED"),
-            Self::Terminated => write!(f, "TERMINATED"),
             Self::Failed(e) => write!(f, "FAILED({e})"),
+            s => f.write_str(s.name()),
         }
     }
 }
@@ -112,7 +122,7 @@ impl EmulatorConfig {
     pub fn new(app_url: impl Into<String>) -> Self {
         Self {
             app_url: app_url.into(),
-            app_port: 8080,
+            app_port: kotatsu::DEFAULT_APP_PORT,
             listen: "127.0.0.1:0".parse().expect("valid addr"),
             microvm_id: "microvm-dev000000001".into(),
             run_hook_payload: "{}".into(),
@@ -154,8 +164,7 @@ impl Shared {
     }
 
     /// POSTs a lifecycle hook to the app under `hook_timeout`. 2xx = ok;
-    /// 404/405/501 = "hook not implemented" → ok (hooks are optional —
-    /// generic servers answer POST with 501 rather than 404/405).
+    /// a "not implemented" status (`hook_not_implemented`) → ok.
     pub async fn call_hook(
         &self,
         name: &str,
@@ -174,10 +183,7 @@ impl Shared {
         .map_err(|_| format!("{name} hook timed out"))?
         .map_err(|e| format!("{name} hook connect failed: {e}"))?;
         let s = resp.status();
-        if s == StatusCode::NOT_FOUND
-            || s == StatusCode::METHOD_NOT_ALLOWED
-            || s == StatusCode::NOT_IMPLEMENTED
-        {
+        if hook_not_implemented(s) {
             // "not implemented" statuses — distinguishable from a real
             // hook only in the debug log.
             tracing::debug!(hook = name, status = %s, "hook skipped (not implemented)");
@@ -221,6 +227,9 @@ impl Shared {
     }
 
     /// Drives any live state to `Terminated` and aborts the boot task.
+    /// A failed hook leaves the state as it was, except `Pending`: with
+    /// the boot task aborted nothing would settle it, so it becomes
+    /// `Failed`.
     pub async fn terminate(&self) -> Result<(), String> {
         let _g = self.lifecycle.lock().await;
         if let Some(boot) = self.boot.lock().take() {
@@ -229,17 +238,36 @@ impl Shared {
         match self.dev_state() {
             DevState::Terminated => Ok(()),
             _ => {
-                self.call_hook(
-                    "terminate",
-                    &self.cfg.hooks.terminate,
-                    serde_json::json!({}),
-                )
-                .await?;
+                if let Err(e) = self
+                    .call_hook(
+                        "terminate",
+                        &self.cfg.hooks.terminate,
+                        serde_json::json!({}),
+                    )
+                    .await
+                {
+                    self.state_tx.send_if_modified(|s| {
+                        if !matches!(s, DevState::Pending) {
+                            return false;
+                        }
+                        *s = DevState::Failed(e.clone());
+                        true
+                    });
+                    return Err(e);
+                }
                 self.set_state(DevState::Terminated);
                 Ok(())
             }
         }
     }
+}
+
+/// 404/405/501 mean "hook not implemented": hooks are optional, and
+/// generic servers answer an unknown POST with 501 rather than 404/405.
+fn hook_not_implemented(s: StatusCode) -> bool {
+    s == StatusCode::NOT_FOUND
+        || s == StatusCode::METHOD_NOT_ALLOWED
+        || s == StatusCode::NOT_IMPLEMENTED
 }
 
 /// A running emulator — the local stand-in for one MicroVM endpoint.
@@ -270,6 +298,7 @@ impl Emulator {
             state_tx,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             lifecycle: tokio::sync::Mutex::new(()),
             boot: parking_lot::Mutex::new(None),
@@ -327,14 +356,8 @@ impl Emulator {
                         .await;
                         match probe {
                             Ok(Ok(r)) if r.status().is_success() => return Ok(()),
-                            Ok(Ok(r))
-                                if r.status() == StatusCode::NOT_FOUND
-                                    || r.status() == StatusCode::METHOD_NOT_ALLOWED
-                                    || r.status() == StatusCode::NOT_IMPLEMENTED =>
-                            {
-                                // Hook not implemented → app is ready.
-                                return Ok(());
-                            }
+                            // Hook not implemented → app is ready.
+                            Ok(Ok(r)) if hook_not_implemented(r.status()) => return Ok(()),
                             Ok(Ok(_)) | Ok(Err(_)) => {
                                 tokio::time::sleep(shared.cfg.ready_poll).await
                             }
@@ -377,7 +400,8 @@ impl Emulator {
         self.shared.dev_state()
     }
 
-    /// Waits for boot to settle (Running or Failed).
+    /// Waits for boot to settle: `Running`, `Failed`, or `Terminated`
+    /// by a terminate during boot.
     pub async fn wait_boot(&self) -> DevState {
         let mut rx = self.shared.state_tx.subscribe();
         let _ = rx.wait_for(|s| !matches!(s, DevState::Pending)).await;
@@ -415,34 +439,57 @@ impl Drop for Emulator {
 
 // -- control API (operator-facing, not part of the AWS contract) ------
 
+/// `{"state":"RUNNING"}`; a `FAILED` state adds `"error"`.
 #[derive(Serialize)]
 struct StateBody {
-    state: DevState,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 async fn state_handler(State(s): State<Arc<Shared>>) -> axum::Json<StateBody> {
+    let state = s.dev_state();
     axum::Json(StateBody {
-        state: s.dev_state(),
+        state: state.name(),
+        error: match state {
+            DevState::Failed(e) => Some(e),
+            _ => None,
+        },
     })
 }
 
-async fn suspend_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.suspend().await {
-        Ok(()) => (StatusCode::OK, "suspended".into()),
-        Err(e) => (StatusCode::CONFLICT, e),
-    }
+async fn suspend_handler(State(s): State<Arc<Shared>>, headers: HeaderMap) -> (StatusCode, String) {
+    control(&headers, s.suspend(), "suspended").await
 }
 
-async fn resume_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.resume().await {
-        Ok(()) => (StatusCode::OK, "running".into()),
-        Err(e) => (StatusCode::CONFLICT, e),
-    }
+async fn resume_handler(State(s): State<Arc<Shared>>, headers: HeaderMap) -> (StatusCode, String) {
+    control(&headers, s.resume(), "running").await
 }
 
-async fn terminate_handler(State(s): State<Arc<Shared>>) -> (StatusCode, String) {
-    match s.terminate().await {
-        Ok(()) => (StatusCode::OK, "terminated".into()),
+async fn terminate_handler(
+    State(s): State<Arc<Shared>>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    control(&headers, s.terminate(), "terminated").await
+}
+
+/// Runs a control transition: 200 on success, 409 with the reason
+/// otherwise. Browsers attach `Origin` to every POST, so refusing it
+/// keeps a web page from driving this unauthenticated API (CSRF);
+/// curl and other operator tools send none.
+async fn control(
+    headers: &HeaderMap,
+    op: impl std::future::Future<Output = Result<(), String>>,
+    done: &str,
+) -> (StatusCode, String) {
+    if headers.contains_key(header::ORIGIN) {
+        return (
+            StatusCode::FORBIDDEN,
+            "control API refuses browser (Origin) requests".into(),
+        );
+    }
+    match op.await {
+        Ok(()) => (StatusCode::OK, done.into()),
         Err(e) => (StatusCode::CONFLICT, e),
     }
 }

@@ -110,7 +110,7 @@ impl fmt::Debug for TenantKey {
 pub struct MicrovmId(pub(crate) String);
 
 impl MicrovmId {
-    /// Wraps a raw id string without further validation.
+    /// Wraps a raw id string; only an empty id is rejected.
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let id = id.into();
         if id.is_empty() {
@@ -265,18 +265,12 @@ impl PortSpec {
                 .trim()
                 .parse()
                 .map_err(|_| Error::invalid(format!("bad port range {s:?}")))?;
-            if start == 0 || start > end {
-                return Err(Error::invalid(format!("bad port range {s:?}")));
-            }
-            return Ok(Self::Range { start, end });
+            return Self::range(start, end);
         }
         let port: u16 = s
             .parse()
             .map_err(|_| Error::invalid(format!("bad port {s:?}")))?;
-        if port == 0 {
-            return Err(Error::invalid("port 0 is not valid"));
-        }
-        Ok(Self::Port(port))
+        Self::port(port)
     }
 
     /// Converts to the SDK union type.

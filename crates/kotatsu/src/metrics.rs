@@ -36,7 +36,8 @@ pub mod names {
     pub const POOL_ASSIGNED: &str = "kotatsu_pool_assigned";
     /// Bindings dropped per maintain tick.
     pub const BINDINGS_DROPPED: &str = "kotatsu_pool_bindings_dropped_total";
-    /// VMs reaped for max_age.
+    /// VMs reaped: past `max_age`, sentinel-marked, or lost
+    /// ([`crate::PoolReport::reaped`]).
     pub const REAPED_TOTAL: &str = "kotatsu_pool_reaped_total";
     /// Warm VMs launched to reach the (possibly scheduled) target.
     pub const WARMED_TOTAL: &str = "kotatsu_pool_warmed_total";

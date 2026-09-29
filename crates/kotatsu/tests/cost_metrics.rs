@@ -337,6 +337,66 @@ async fn pool_acquire_emits_metrics() {
     assert_eq!(gauges.get("kotatsu_pool_warm{}"), Some(&0.0));
 }
 
+/// `MemoryStore` whose `list` fails while `fail_list` is set — a store
+/// outage seen by `stats()`.
+#[derive(Default)]
+struct ListFailStore {
+    inner: MemoryStore,
+    fail_list: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl kotatsu::StateStore for ListFailStore {
+    async fn get(&self, t: &TenantKey) -> kotatsu::Result<Option<kotatsu::Binding>> {
+        self.inner.get(t).await
+    }
+    async fn claim(&self, b: &kotatsu::Binding) -> kotatsu::Result<kotatsu::ClaimOutcome> {
+        self.inner.claim(b).await
+    }
+    async fn release(&self, t: &TenantKey, e: &kotatsu::MicrovmId) -> kotatsu::Result<bool> {
+        self.inner.release(t, e).await
+    }
+    async fn list(&self) -> kotatsu::Result<Vec<kotatsu::Binding>> {
+        if self.fail_list.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(kotatsu::Error::Store("simulated list failure".into()));
+        }
+        self.inner.list().await
+    }
+}
+
+/// A store outage must not zero the `assigned` gauge: `stats()` keeps
+/// the last published value instead of reporting every tenant gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stats_store_failure_keeps_last_gauges() {
+    let rec = TestRecorder::default();
+    let gauges = rec.gauges.clone();
+    metrics::with_local_recorder(&rec, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let cp = Arc::new(MockControlPlane::new());
+                let store = Arc::new(ListFailStore::default());
+                let mut cfg = PoolConfig::new(RunRequest::new("img"));
+                cfg.warm_size = 0;
+                let pool = SandboxPool::new(cp, store.clone(), cfg).unwrap();
+                pool.acquire(&TenantKey::new("u1").unwrap()).await.unwrap();
+                assert_eq!(pool.stats().await.assigned, 1);
+
+                store
+                    .fail_list
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(pool.stats().await.assigned, 0);
+            })
+        })
+    });
+
+    let gauges = gauges.lock();
+    assert_eq!(
+        gauges.get("kotatsu_pool_assigned{}"),
+        Some(&1.0),
+        "gauges: {gauges:?}"
+    );
+}
+
 /// Release and maintain paths also emit counters — a dead binding is
 /// dropped by the sweep and the release's terminate is counted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

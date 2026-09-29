@@ -1,24 +1,18 @@
 [package]
 name = "kotatsud"
 description = "Session gateway daemon for AWS Lambda MicroVM sandboxes (kotatsu)"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords = ["aws", "lambda", "microvm", "gateway", "proxy"]
 categories = ["network-programming", "web-programming::http-server"]
-
-[[bin]]
-name = "kotatsud"
-path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 aws-config.workspace = true
 axum.workspace = true
-bytes.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 http.workspace = true

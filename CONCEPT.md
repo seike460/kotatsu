@@ -79,7 +79,7 @@ kotatsu は「テナントが来たら温かい microVM がすぐ用意され、
 | crate / bin | 役割 |
 |---|---|
 | `kotatsu` | 組込みコアライブラリ。`SandboxPool` / `Sandbox` / `MicrovmEndpoint` / `TokenVending` を型付きで提供。自分のサービスに直接組める |
-| `kotatsud` | 常駐ゲートウェイデーモン。単一 HTTPS エンドポイントとして立ち、テナント → microVM を解決して中継 |
+| `kotatsud` | 常駐ゲートウェイデーモン。単一の HTTP エンドポイントとして立ち(TLS は前段で終端)、テナント → microVM を解決して中継 |
 | `kotatsu`(CLI) | `vm` / `token` / `image` / `tag` / `dev` / `cost` / `serve` サブコマンド。warm pool の操作面は `kotatsud` に内包される(CLI からは `serve` で起動するだけ) |
 | `kotatsu-dev` | ローカルエミュレーションモード(下記) |
 
@@ -95,8 +95,9 @@ kotatsu は「テナントが来たら温かい microVM がすぐ用意され、
    gRPC はトレーラー透過が未対応のため現状対象外)
 5. アイドル suspend は VM 側 `idlePolicy` が担い、ゲートウェイは
    max-age 到来 → `terminate-microvm` と warm 補充を担う
-6. 全てを Prometheus メトリクス + 構造化ログ + コスト見積り(料金定数は
-   microvms-core と同様「推定値であることを型で表現」)で観測可能に
+6. Prometheus メトリクス(`/metrics`)と tracing ログで観測可能に。コスト見積りは
+   CLI の `kotatsu cost` とライブラリの `kotatsu::cost` が担う
+   (組込みの料金定数は us-east-1・ARM の公式単価)
 
 ### kotatsu core(組込みライブラリ)実際の API
 
@@ -124,44 +125,37 @@ sandbox.release().await?; // または suspend() — プール方針と tenant �
 イメージビルドは AWS 側の非同期処理で、フック実装の試行錯誤が遅い。
 `kotatsu dev` は **AWS 側の契約だけをローカルで再現**する。
 
-- 手元のコンテナ(Docker/Finch/Apple container)でアプリを起動
-- エミュレートする契約: `/ready` `/run` `/suspend` `/resume` `/terminate` フック呼出、
+- アプリは利用者が手元で(直接、または Docker/Finch/Apple container などで)起動しておき、
+  `--app-url` で指す。`kotatsu dev` はアプリもコンテナも起動しない
+- エミュレートする契約: `/validate` `/run` `/ready` `/suspend` `/resume` `/terminate` フック呼出、
   `X-aws-proxy-auth` / `X-aws-proxy-port` / WS subprotocol、PENDING→RUNNING、SUSPENDED→RUNNING の遷移
 - 本物の VMM(libkrun/Firecracker)での実行はスコープ外(契約の再現に集中)
 
 ## 5. 機能ロードマップ
 
-- **MVP**: `run/get/suspend/resume/terminate` ラッパ + tenant→VM テーブル +
-  JWE mint/refresh + HTTP プロキシ + max-age リーパ + `kotatsu dev`(フック呼出のみ)
-- **v0.2**(実装済): WS 通過(SSE はプロキシのストリーミング経路で通過。
+- **v0.1**(実装済): `run/get/suspend/resume/terminate` ラッパ + tenant→VM テーブル +
+  JWE mint/refresh + HTTP プロキシ + max-age リーパ + `kotatsu dev`、
+  WS 通過(SSE はプロキシのストリーミング経路で通過。
   gRPC はトレーラー透過未対応のため現状対象外)、
   warm pool サイジング(定数 + `WarmWindow` による UTC 時間帯スケジュール、
   縮退時は超過 VM を terminate)、Prometheus、コスト見積、SQLite 状態ストア(再起動耐性)
-- **v0.3**: 複数ゲートウェイの状態共有(DynamoDB/ElastiServerless 等、要検証)、
+- **next**: 複数ゲートウェイの状態共有(DynamoDB/ElastiCache Serverless 等、要検証)、
   per-tenant クォータ・レート制限、トークン narrower-scope ポリシー
 - **later**: OTel トレース、MCP サーバ、`microvms-agentd` イメージとの連携プリセット
 
 ## 6. なぜ Rust か
 
 - 常駐ゲートウェイは「N 並行の WS/SSE を低メモリで捌く」仕事。Rust の実需が素直に効く
-- 単一 static バイナリで Lambda / Fargate / EC2 / **microVM 内** のどこへも置ける
+- 単一バイナリ(Linux 版は glibc 2.28 以上)で Lambda / Fargate / EC2 / **microVM 内** のどこへも置ける
 - `aws-sdk-lambdamicrovms` が GA 済み。生成 SDK への薄い高級ラッパとして
   typestate(「RUNNING でしか connect できない」等を型で閉じる)の旨味が出せる
 - エコシステムに Rust 製の「フリート層」が無い(microvms-agentd は単体層)
 
 ## 7. 名前の選定
 
-和名(日本語由来)で、crates.io/GitHub/PyPI で衝突しないことを確認した。
-
-| 候補 | 意味 | 結果 |
-|---|---|---|
-| sunaba(砂場)| sandbox そのもの | ❌ PyPI で同名の sandbox MCP が稼働中 |
-| hibana(火花)| Firecracker の火種 | ❌ crates.io 登録済み |
-| ryokan(旅館)| 客室=VM のメタファー | ❌ 別領域だが同名 Rust OSS が稼働中 |
-| engawa(縁側)| 境界/接続 | ❌ crates.io 登録済み |
-| okami(女将)| 宿の支配人 | ❌ crates.io 登録済み |
-| **kotatsu(炬燵)** | **warm pool のメタファー** | ✅ crates.io 空き・同一領域に GitHub 衝突なし |
-| hatago / yadoya / monban / toride | 旅籠/宿屋/門番/砦 | 予備(全て空き) |
+和名(日本語由来)で、製品の意味に合う名前として kotatsu(炬燵)を選んだ。
+炬燵は warm pool のメタファー(§4)。ほかの候補と落選理由は `docs/research.md` の
+「ネーミング調査」にある。
 
 ## 8. リスク・未検証事項
 
@@ -173,9 +167,10 @@ sandbox.release().await?; // または suspend() — プール方針と tenant �
 - イメージビルド時間の実測(dev モードの価値づけ)
 - microvms-agentd が将来フリート層を内包する可能性(差別化を warm/gateway/dev に絞る)
 
-## 9. ライセンス方針(案)
+## 9. ライセンス
 
-`Apache-2.0 OR MIT`(AWS SDK for Rust、Firecracker 周辺クレートと同じ慣習)。
+`MIT OR Apache-2.0`(Rust エコシステムで一般的なデュアルライセンス)。
+条文はリポジトリ直下の `LICENSE-MIT` と `LICENSE-APACHE`。
 
 ## 10. 参考(主要ソース)
 

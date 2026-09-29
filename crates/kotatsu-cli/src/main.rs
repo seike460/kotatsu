@@ -8,7 +8,7 @@
 //! - `kotatsu tag …` — resource tagging by ARN (list/set/unset)
 //! - `kotatsu dev` — run the local contract emulator (`kotatsu-dev`)
 //! - `kotatsu cost` — offline cost estimate (no AWS calls)
-//! - `kotatsu serve` — hand off to the `kotatsud` gateway daemon
+//! - `kotatsu serve` — hand off to the `kotatsud` gateway daemon on PATH
 
 use std::net::SocketAddr;
 
@@ -48,7 +48,7 @@ enum Cmd {
     Dev(DevCmd),
     /// Offline monthly cost estimate (official us-east-1 rates).
     Cost(CostArgs),
-    /// Run the kotatsud session gateway (execs the kotatsud binary).
+    /// Run the kotatsud session gateway (execs `kotatsud` from PATH).
     ///
     /// Args are forwarded verbatim; clap-owned flags like `--region` or
     /// `--help` must follow `--` to reach kotatsud unambiguously.
@@ -355,7 +355,11 @@ struct DevCmd {
     #[arg(long)]
     app_url: String,
     /// The app's port — the only `X-aws-proxy-port` value accepted.
-    #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+    #[arg(
+        long,
+        default_value_t = kotatsu::DEFAULT_APP_PORT,
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
     app_port: u16,
     /// Address the fake VM endpoint binds.
     #[arg(long, default_value = "127.0.0.1:0")]
@@ -373,7 +377,7 @@ struct DevCmd {
 
 #[derive(Args)]
 struct CostArgs {
-    /// Baseline memory in GB (tiered: 1,2,4 → 1,2,4 vCPU).
+    /// Baseline memory tier in GB: 1, 2, 4 or 8 (vCPU = GB / 2).
     #[arg(long, default_value = "2")]
     baseline_gb: u32,
     /// Non-peak RUNNING seconds in the period.
@@ -431,8 +435,8 @@ async fn sdk_config(region: &Option<String>) -> aws_config::SdkConfig {
     loader.load().await
 }
 
-async fn aws_cp(region: &Option<String>) -> anyhow::Result<AwsControlPlane> {
-    Ok(AwsControlPlane::new(&sdk_config(region).await))
+async fn aws_cp(region: &Option<String>) -> AwsControlPlane {
+    AwsControlPlane::new(&sdk_config(region).await)
 }
 
 fn vm_id(id: &str) -> anyhow::Result<MicrovmId> {
@@ -440,7 +444,7 @@ fn vm_id(id: &str) -> anyhow::Result<MicrovmId> {
 }
 
 async fn vm(c: VmCmd, region: Option<String>) -> anyhow::Result<()> {
-    let cp = aws_cp(&region).await?;
+    let cp = aws_cp(&region).await;
     match c.cmd {
         VmSub::List { image, version } => {
             let vms = cp.list(image.as_deref(), version.as_deref()).await?;
@@ -879,7 +883,7 @@ fn check_ttl(ttl_minutes: i32) -> anyhow::Result<()> {
 }
 
 async fn token(c: TokenCmd, region: Option<String>) -> anyhow::Result<()> {
-    let cp = aws_cp(&region).await?;
+    let cp = aws_cp(&region).await;
     match c.cmd {
         TokenSub::Mint {
             id,
@@ -909,6 +913,18 @@ async fn dev(c: DevCmd) -> anyhow::Result<()> {
     if c.no_mock_tokens && c.tokens.is_empty() {
         eprintln!("warning: --no-mock-tokens with no --token means no token is accepted");
     }
+    if !c.listen.ip().is_loopback() {
+        eprintln!(
+            "warning: --listen {} is not a loopback address: anyone who can reach it can use \
+             the unauthenticated /_kotatsu/* control API{}",
+            c.listen,
+            if c.no_mock_tokens {
+                ""
+            } else {
+                ", and reach the app with any `dev-token-*` X-aws-proxy-auth value"
+            }
+        );
+    }
     let mut cfg = EmulatorConfig::new(c.app_url);
     cfg.app_port = c.app_port;
     cfg.listen = c.listen;
@@ -934,14 +950,43 @@ async fn dev(c: DevCmd) -> anyhow::Result<()> {
     // anything but Running (Failed, or Terminated via the control API
     // mid-boot) is a dead end.
     match emu.wait_boot().await {
-        kotatsu_dev::DevState::Running => tracing::info!("emulator ready"),
+        kotatsu_dev::DevState::Running => {}
         s => bail!("emulator boot failed: {s}"),
     }
+    let shutdown = shutdown_signal()?;
+    tracing::info!("emulator ready");
     // Run until interrupted, then fire the app's /terminate hook.
-    tokio::signal::ctrl_c().await?;
+    shutdown.await?;
     eprintln!("shutting down — calling the app's /terminate hook");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), emu.terminate()).await;
+    let budget = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(budget, emu.terminate()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("warning: {e}"),
+        Err(_) => eprintln!("warning: the app's /terminate hook did not finish within {budget:?}"),
+    }
     Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM (`docker stop`, systemd and IDE stop
+/// buttons send the latter). The handlers are installed by this call,
+/// not on the first poll.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = std::io::Result<()>>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut int = signal(SignalKind::interrupt())?;
+    let mut term = signal(SignalKind::terminate())?;
+    Ok(async move {
+        tokio::select! {
+            _ = int.recv() => {}
+            _ = term.recv() => {}
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = std::io::Result<()>>> {
+    Ok(tokio::signal::ctrl_c())
 }
 
 fn cost(c: CostArgs) -> anyhow::Result<()> {
@@ -987,18 +1032,19 @@ fn serve(args: Vec<String>, region: Option<String>) -> anyhow::Result<()> {
         // True exec: PID, exit status and signals pass through unchanged,
         // and no orphaned kotatsud survives a signal to this process.
         use std::os::unix::process::CommandExt;
-        Err(cmd.exec()).context(
-            "failed to exec `kotatsud` — install it (cargo install --path crates/kotatsud)",
-        )
+        Err(cmd.exec()).context(KOTATSUD_EXEC_FAILED)
     }
     #[cfg(not(unix))]
     {
-        let status = cmd.status().context(
-            "failed to exec `kotatsud` — install it (cargo install --path crates/kotatsud)",
-        )?;
+        let status = cmd.status().context(KOTATSUD_EXEC_FAILED)?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
+
+/// Hint for a missing `kotatsud`; it has to work outside a clone of the
+/// repository.
+const KOTATSUD_EXEC_FAILED: &str = "failed to exec `kotatsud` — install it from the GitHub \
+     Releases tarball or with `cargo install --locked --git https://github.com/seike460/kotatsu kotatsud`";
 
 #[cfg(test)]
 mod tests {
@@ -1090,22 +1136,6 @@ mod tests {
             }
             _ => panic!("wrong parse"),
         }
-    }
-
-    #[test]
-    fn port_specs_parse() {
-        assert_eq!(PortSpec::parse("8080").unwrap(), PortSpec::Port(8080));
-        assert_eq!(
-            PortSpec::parse("9000-9010").unwrap(),
-            PortSpec::Range {
-                start: 9000,
-                end: 9010
-            }
-        );
-        assert_eq!(PortSpec::parse("all").unwrap(), PortSpec::All);
-        assert!(PortSpec::parse("0").is_err());
-        assert!(PortSpec::parse("9000-9000").is_ok());
-        assert!(PortSpec::parse("9010-9000").is_err());
     }
 
     #[test]
