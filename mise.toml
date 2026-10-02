@@ -1,0 +1,2 @@
+[tools]
+cargo-deny = "0.20.2"
