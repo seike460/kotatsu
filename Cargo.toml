@@ -12,7 +12,11 @@ repository = "https://github.com/seike460/kotatsu"
 anyhow = "1"
 async-trait = "0.1"
 aws-config = "1"
-aws-sdk-lambdamicrovms = "1.4"
+# The default `rustls` feature pulls in the legacy connector (hyper 0.14 +
+# rustls 0.21 + h2 0.3), which RUSTSEC-2026-0098/0099/0104/0258 cover. The
+# default HTTPS client (`default-https-client`: hyper 1.x + rustls-aws-lc)
+# is what the SDK actually uses.
+aws-sdk-lambdamicrovms = { version = "1.4", default-features = false, features = ["default-https-client", "rt-tokio"] }
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -20,8 +24,8 @@ futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
 humantime-serde = "1"
-kotatsu = { path = "crates/kotatsu", version = "0.1.1" }
-kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.1" }
+kotatsu = { path = "crates/kotatsu", version = "0.1.2" }
+kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.2" }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 parking_lot = "0.12"

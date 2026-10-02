@@ -239,6 +239,10 @@ impl ControlPlane for MockControlPlane {
         Ok(())
     }
 
+    // Rust 1.99 deprecates `fetch_update` for `try_update`, which is still
+    // unstable on the MSRV (1.94.1). Drop the allow when the MSRV reaches
+    // the release that stabilizes it.
+    #[allow(deprecated)]
     async fn resume(&self, id: &MicrovmId) -> Result<()> {
         if let Some(gate) = &self.behavior.resume_gate {
             gate.notified().await;
