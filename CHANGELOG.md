@@ -24,9 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `yoke-derive` 0.8.3, yanked from crates.io, is replaced by 0.8.4 in
   `Cargo.lock`.
-- CI runs `cargo deny check advisories` on every push and pull request,
-  and weekly. A vulnerability, an unmaintained or unsound crate, or a
-  yanked version in `Cargo.lock` fails the job (`deny.toml`).
+- CI runs `cargo deny check advisories` on pushes to `main`, on pull
+  requests, and weekly. A vulnerability, an unmaintained or unsound crate,
+  or a yanked version in `Cargo.lock` fails the job (`deny.toml`).
 
 ## [0.1.1] - 2026-09-29
 
