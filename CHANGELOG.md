@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-02
+
+### Security
+
+- `aws-sdk-lambdamicrovms` is built without its default `rustls` feature,
+  which linked the SDK's legacy TLS connector (hyper 0.14, rustls 0.21,
+  h2 0.3, rustls-webpki 0.101). Those crates carry RUSTSEC-2026-0098,
+  RUSTSEC-2026-0099, RUSTSEC-2026-0104 and RUSTSEC-2026-0258, so
+  `cargo audit` and `cargo deny` flagged every kotatsu build. The SDK
+  client still uses its default HTTPS client (hyper 1.x with rustls and
+  aws-lc), as before; the legacy connector was linked but never used.
+  Ten crates left the dependency tree.
+
+### Changed
+
+- `yoke-derive` 0.8.3, yanked from crates.io, is replaced by 0.8.4 in
+  `Cargo.lock`.
+- CI runs `cargo deny check advisories` on every push and pull request,
+  and weekly. A vulnerability, an unmaintained or unsound crate, or a
+  yanked version in `Cargo.lock` fails the job (`deny.toml`).
+
 ## [0.1.1] - 2026-09-29
 
 ### Security
@@ -236,6 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Dockerfile` (kotatsud + kotatsu), `LICENSE-MIT`/`LICENSE-APACHE`,
   CI (fmt/clippy/test) and tag-release binary workflow.
 
-[Unreleased]: https://github.com/seike460/kotatsu/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/seike460/kotatsu/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/seike460/kotatsu/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/seike460/kotatsu/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/seike460/kotatsu/releases/tag/v0.1.0

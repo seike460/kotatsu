@@ -1,7 +1,7 @@
 [package]
 name = "kotatsu-cli"
 description = "CLI for the kotatsu AWS Lambda MicroVMs fleet control plane"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

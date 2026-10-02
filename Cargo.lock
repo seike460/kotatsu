@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "kotatsu"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "kotatsu-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "kotatsu-dev"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "kotatsud"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "aws-config",

@@ -24,8 +24,8 @@ futures-util = "0.3"
 http = "1"
 http-body-util = "0.1"
 humantime-serde = "1"
-kotatsu = { path = "crates/kotatsu", version = "0.1.1" }
-kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.1" }
+kotatsu = { path = "crates/kotatsu", version = "0.1.2" }
+kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.2" }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 parking_lot = "0.12"
