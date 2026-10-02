@@ -726,6 +726,10 @@ impl FlakyStore {
 
 #[async_trait::async_trait]
 impl StateStore for FlakyStore {
+    // Rust 1.99 deprecates `fetch_update` for `try_update`, which is still
+    // unstable on the MSRV (1.94.1). Drop the allow when the MSRV reaches
+    // the release that stabilizes it.
+    #[allow(deprecated)]
     async fn get(&self, t: &TenantKey) -> kotatsu::Result<Option<Binding>> {
         self.get_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -744,6 +748,10 @@ impl StateStore for FlakyStore {
         }
         self.inner.get(t).await
     }
+    // Rust 1.99 deprecates `fetch_update` for `try_update`, which is still
+    // unstable on the MSRV (1.94.1). Drop the allow when the MSRV reaches
+    // the release that stabilizes it.
+    #[allow(deprecated)]
     async fn claim(&self, b: &Binding) -> kotatsu::Result<ClaimOutcome> {
         if b.sentinel {
             let n = self
