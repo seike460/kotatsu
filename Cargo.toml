@@ -27,7 +27,7 @@ humantime-serde = "1"
 kotatsu = { path = "crates/kotatsu", version = "0.1.2" }
 kotatsu-dev = { path = "crates/kotatsu-dev", version = "0.1.2" }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.17"
+metrics-exporter-prometheus = "0.18"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
 rust_decimal = "1"
